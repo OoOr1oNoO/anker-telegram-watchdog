@@ -1,0 +1,11 @@
+.env
+*.log
+*.log.*
+anker_ups.plan
+dist/
+build/
+*.spec
+__pycache__/
+run_test.command
+.DS_Store
+*.zip
