@@ -3,13 +3,18 @@
 Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 
 - Alert when the station loses AC input and when grid power comes back (with outage duration)
-- Charge alerts at 75 / 50 / 25 % for the main battery and each expansion battery
+- Charge alerts for the main battery and each expansion battery (default 75 / 50 / 25 %)
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
 - **🔦 Light** button: switch the station light (off / low / medium / high / blink)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
   energy through the station (kWh in / out) and a daily summary with a chart
   (data is kept in `anker_ups.db` next to the script)
+- **⚙️ Settings** button: charge alert thresholds, critical level, daily summary time and which
+  alerts to send; station outputs (AC / DC 12V on-off, Normal / Smart mode; turning AC off asks
+  for confirmation), AC charge limit, fast charging, display brightness and timeout, auto-off.
+  Only the controls the station reports are shown. Settings are stored in the database;
+  `.env` values are the defaults
 - Windows: switches to the Power saver plan during an outage and restores the previous plan afterwards
 
 Data comes from the Anker cloud (MQTT) through the unofficial
@@ -65,6 +70,8 @@ sudo systemctl disable --now dnf-makecache.timer oracle-cloud-agent oracle-cloud
 ### Windows exe
 
 `build_exe.bat` builds a windowless `dist\anker_ups.exe` with PyInstaller; keep `.env` next to it.
+The exe is built without matplotlib, so charts are not available in it; without `TG_BOT_TOKEN`
+the database and statistics are switched off anyway.
 Unsigned PyInstaller builds are sometimes flagged by antivirus heuristics; running the script
 with `uv` avoids that.
 

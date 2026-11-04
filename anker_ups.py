@@ -47,14 +47,14 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 # persistent reply keyboard; button texts come back as normal messages.
 # Telegram gives all buttons in a row the same width, so Status gets its own row.
 MAIN_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}],
-                                         [{"text": "🔦 Light"}, {"text": "📈 Stats"}]],
+                                         [{"text": "🔦 Light"}, {"text": "📈 Stats"},
+                                          {"text": "⚙️ Settings"}]],
                             "resize_keyboard": True, "is_persistent": True})
 STATS_MENU = json.dumps({"inline_keyboard": [
     [{"text": "Chart 24 h", "callback_data": "stats:chart24"},
      {"text": "Chart 7 days", "callback_data": "stats:chart168"}],
     [{"text": "Outages", "callback_data": "stats:outages"},
      {"text": "Energy", "callback_data": "stats:energy"}]]})
-LIGHT_MODES = {"off": "Off", "low": "Low", "medium": "Medium", "high": "High", "blinking": "Blink"}
 POWER_SAVER_GUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
 IS_WINDOWS = platform.system() == "Windows"
 REALTIME_TIMEOUT = 300  # seconds the device streams 0405 messages before the poller re-triggers
@@ -84,8 +84,7 @@ class BotHandlers:
     """Callbacks the Telegram thread uses to read state and act on the station."""
 
     status: Callable[[], str]
-    light_state: Callable[[], str]
-    set_light: Callable[[str], str]
+    controller: "Controller"
     stats: "Stats | None" = None
 
 
@@ -156,19 +155,13 @@ class Telegram:
         if self.enabled:
             threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
 
-    @staticmethod
-    def _light_menu(current: str) -> tuple[str, str, str]:
-        buttons = [{"text": ("• " if key == current else "") + label, "callback_data": f"light:{key}"}
-                   for key, label in LIGHT_MODES.items()]
-        markup = json.dumps({"inline_keyboard": [buttons[:3], buttons[3:]]})
-        return "text", f"🔦 Light: {LIGHT_MODES.get(current, '?')}", markup
-
     def _poll_commands(self, handlers: BotHandlers) -> None:
         with contextlib.suppress(Exception):
             self._call("setMyCommands", {"commands": json.dumps(
                 [{"command": "status", "description": "Anker status"},
                  {"command": "light", "description": "Station light"},
-                 {"command": "stats", "description": "Charts, outages, energy"}])})
+                 {"command": "stats", "description": "Charts, outages, energy"},
+                 {"command": "settings", "description": "Notifications and station settings"}])})
         offset = None
         while True:
             try:
@@ -199,34 +192,37 @@ class Telegram:
         self.queue.put(("text", text, MAIN_KEYBOARD))
         return "Sent"
 
+    def _edit(self, msg: dict, view: tuple[str, str]) -> None:
+        with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
+            self._call("editMessageText", {"chat_id": self.chat_id, "message_id": msg.get("message_id"),
+                                           "text": view[0], "reply_markup": view[1]})
+
     def _handle_update(self, upd: dict, h: BotHandlers) -> None:
         if cb := upd.get("callback_query"):
             msg = cb.get("message") or {}
             # answer only the owner's chat
             if str(msg.get("chat", {}).get("id")) != self.chat_id:
                 return
-            kind, _, action = (cb.get("data") or "").partition(":")
+            kind, _, rest = (cb.get("data") or "").partition(":")
+            toast = ""
             if kind == "stats" and h.stats:
-                result = self._handle_stats(action, h.stats)
-                self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": result})
-                return
-            if kind != "light" or action not in LIGHT_MODES:
-                return
-            result = h.set_light(action)
-            self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": result})
-            if not result.startswith("⚠️"):
-                _, text, markup = self._light_menu(action)
-                with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
-                    self._call("editMessageText", {"chat_id": self.chat_id,
-                                                   "message_id": msg.get("message_id"),
-                                                   "text": text, "reply_markup": markup})
+                toast = self._handle_stats(rest, h.stats)
+            elif kind == "m":
+                self._edit(msg, h.controller.render(rest))
+            elif kind == "a":
+                key, _, value = rest.partition(":")
+                toast, menu = h.controller.act(key, value)
+                self._edit(msg, h.controller.render(menu))
+            self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})
             return
         msg = upd.get("message") or {}
         if str(msg.get("chat", {}).get("id")) != self.chat_id:
             return
         text = (msg.get("text") or "").strip().lower()
         if text.startswith("/light") or "light" in text:
-            self.queue.put(self._light_menu(h.light_state()))
+            self.queue.put(("text", *h.controller.render("light")))
+        elif text.startswith("/settings") or "settings" in text:
+            self.queue.put(("text", *h.controller.render("root")))
         elif text.startswith("/stats") or "stats" in text:
             if h.stats:
                 self.queue.put(("text", "📈 Statistics", STATS_MENU))
@@ -312,6 +308,10 @@ class PowerPlan:
 def fmt_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     return f"{minutes // 60}h {minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
+
+
+def fmt_energy(kwh: float) -> str:
+    return f"{kwh:.2f} kWh" if kwh >= 1 else f"{kwh * 1000:.0f} Wh"
 
 
 def show_popup(title: str, text: str) -> None:
@@ -400,7 +400,7 @@ class Stats:
         lines = ["⚡ Energy through the station (in / out)"]
         for label, since in periods:
             e_in, e_out = self.energy_kwh(since.timestamp())
-            lines.append(f"{label}: {e_in:.2f} / {e_out:.2f} kWh")
+            lines.append(f"{label}: {fmt_energy(e_in)} / {fmt_energy(e_out)}")
         return "\n".join(lines)
 
     def outages_text(self, days: int = 30, limit: int = 10) -> str:
@@ -416,20 +416,19 @@ class Stats:
             lines.append(f"{when}  {fmt_duration(end - start)}{used}")
         return "\n".join(lines)
 
-    def summary_text(self, day: datetime) -> str:
-        start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
+    def summary_text(self, end: datetime, hours: int = 24) -> str:
+        start = end - timedelta(hours=hours)
         rows = self._exec("SELECT AVG(out), MAX(out), SUM(ac_in), SUM(out) FROM samples "
                           "WHERE ts >= ? AND ts < ?", (int(start.timestamp()), int(end.timestamp())))
         avg_out, max_out, sum_in, sum_out = rows[0]
         outages = self.outages_between(start.timestamp(), end.timestamp())
         off = sum(min(e, end.timestamp()) - max(s, start.timestamp()) for s, e, *_ in outages)
         if avg_out is None:
-            return f"📅 {start:%d.%m}: no data"
-        return (f"📅 Summary for {start:%d.%m}\n"
+            return f"📅 Last {hours} h: no data"
+        return (f"📅 Summary, last {hours} h ({start:%d.%m %H:%M} – {end:%d.%m %H:%M})\n"
                 f"Outages: {len(outages)}, without grid {fmt_duration(off)}\n"
                 f"Load: avg {avg_out:.0f} W, peak {max_out:.0f} W\n"
-                f"Energy: in {sum_in * 60 / 3.6e6:.2f} kWh, out {sum_out * 60 / 3.6e6:.2f} kWh")
+                f"Energy: in {fmt_energy(sum_in * 60 / 3.6e6)}, out {fmt_energy(sum_out * 60 / 3.6e6)}")
 
     def chart_png(self, hours: int, end: float | None = None) -> bytes | None:
         import matplotlib  # noqa: PLC0415 - heavy, only needed for charts
@@ -469,16 +468,204 @@ class Stats:
         return buf.getvalue()
 
 
+class Settings:
+    """User settings changed from the bot; stored in the stats DB, .env/CLI give defaults."""
+
+    def __init__(self, stats: "Stats | None", defaults: dict[str, str]):
+        self.stats = stats
+        self.defaults = defaults
+
+    def get(self, key: str) -> str:
+        value = self.stats.meta(f"setting:{key}") if self.stats else None
+        return self.defaults[key] if value is None else value
+
+    def set(self, key: str, value: str) -> None:
+        if self.stats:
+            self.stats.meta(f"setting:{key}", value)
+
+    @property
+    def thresholds(self) -> list[int]:
+        return sorted((int(t) for t in self.get("thresholds").split(",") if t.strip()), reverse=True)
+
+    @property
+    def critical(self) -> int:
+        return int(self.get("critical") or 0)
+
+    @property
+    def summary(self) -> str:
+        return self.get("summary").strip()
+
+    def flag(self, key: str) -> bool:
+        return self.get(key) == "1"
+
+
+THRESHOLD_CHOICES = [90, 75, 50, 25, 10]
+CRITICAL_CHOICES = [0, 5, 10, 15, 20]
+SUMMARY_CHOICES = ["", "07:00", "10:00", "19:00", "23:00"]
+ALERT_FLAGS = {"alert_outage": "Outage", "alert_expansion": "Expansion", "alert_link": "No data"}
+
+# station controls: key -> (state field, {button value: label}, setter); values are strings
+# from callback data, the setter turns them into an MQTT command on the device object
+STATION_CONTROLS: dict[str, tuple[str, dict[str, str], Callable]] = {
+    "light": ("light_mode", {"0": "Off", "1": "Low", "2": "Medium", "3": "High", "4": "Blink"},
+              lambda d, v: d.set_light(mode=int(v))),
+    "ac": ("ac_output_power_switch", {"1": "On", "0": "Off"},
+           lambda d, v: d.set_ac_output(enabled=v == "1")),
+    "acmode": ("ac_output_mode", {"1": "Normal", "2": "Smart"},
+               lambda d, v: d.set_ac_output(mode="normal" if v == "1" else "smart")),
+    "dc": ("dc_output_power_switch", {"1": "On", "0": "Off"},
+           lambda d, v: d.set_dc_output(enabled=v == "1")),
+    "dcmode": ("dc_12v_output_mode", {"1": "Normal", "2": "Smart"},
+               lambda d, v: d.set_dc_output(mode="normal" if v == "1" else "smart")),
+    "limit": ("ac_input_limit", {str(w): f"{w}W" for w in (200, 400, 600, 800, 1000)},
+              lambda d, v: d.set_charge_limit(max_watts=int(v))),
+    "fast": ("ac_fast_charge_switch", {"1": "On", "0": "Off"},
+             lambda d, v: d.set_fast_charging(enabled=v == "1")),
+    "disp": ("display_mode", {"0": "Off", "1": "Low", "2": "Medium", "3": "High"},
+             lambda d, v: d.set_display(mode=int(v))),
+    "dispto": ("display_timeout_seconds", {"20": "20s", "30": "30s", "60": "1m", "300": "5m", "1800": "30m"},
+               lambda d, v: d.set_display(timeout_seconds=int(v))),
+    "autooff": ("device_timeout_minutes", {"0": "Never", "30": "30m", "60": "1h", "120": "2h", "240": "4h",
+                                           "360": "6h", "720": "12h", "1440": "24h"},
+                lambda d, v: d.set_device_timeout(timeout_minutes=int(v))),
+}
+
+
+class Controller:
+    """Renders the Settings / Light inline menus and applies button presses.
+
+    Runs in the Telegram thread; device commands are executed on the asyncio loop.
+    """
+
+    def __init__(self, settings: Settings, data: Callable[[], dict], run: Callable, device):
+        self.settings = settings
+        self.data = data  # latest MQTT values of the station
+        self.run = run  # run(coroutine) -> result, on the asyncio loop
+        self.device = device
+        self.pending: dict[str, tuple[str, float]] = {}  # field -> (value, time) until telemetry catches up
+
+    def _state(self, key: str) -> str | None:
+        field = STATION_CONTROLS[key][0]
+        if field in self.pending and time.time() - self.pending[field][1] < 20:
+            return self.pending[field][0]
+        value = as_int(self.data().get(field))
+        return None if value is None else str(value)
+
+    def _label(self, key: str) -> str:
+        return STATION_CONTROLS[key][1].get(self._state(key) or "", "?")
+
+    def _supported(self, key: str) -> bool:
+        return STATION_CONTROLS[key][0] in self.data()
+
+    def _row(self, key: str, prefix: str = "") -> list[dict]:
+        current = self._state(key)
+        return [{"text": ("• " if value == current else "") + prefix + label, "callback_data": f"a:{key}:{value}"}
+                for value, label in STATION_CONTROLS[key][1].items()]
+
+    @staticmethod
+    def _markup(rows: list[list[dict]], back: bool = True) -> str:
+        if back:
+            rows = [*rows, [{"text": "« Back", "callback_data": "m:root"}]]
+        return json.dumps({"inline_keyboard": [r for r in rows if r]})
+
+    def render(self, menu: str) -> tuple[str, str]:
+        st = self.settings
+        if menu == "light":
+            row = self._row("light")
+            return f"🔦 Light: {self._label('light')}", self._markup([row[:3], row[3:]], back=False)
+        if menu == "notif":
+            th = st.thresholds
+            text = (f"🔔 Notifications\nCharge alerts at: {', '.join(f'{t}%' for t in th) or 'off'}\n"
+                    f"Critical alert: {f'{st.critical}%' if st.critical else 'off'}\n"
+                    f"Daily summary: {st.summary + ' (last 24 h)' if st.summary else 'off'}\n"
+                    + "\n".join(f"{label} alerts: {'on' if st.flag(k) else 'off'}" for k, label in ALERT_FLAGS.items()))
+            rows = [
+                [{"text": ("✓" if t in th else "") + f"{t}%", "callback_data": f"a:th:{t}"} for t in THRESHOLD_CHOICES],
+                [{"text": ("• " if c == st.critical else "") + (f"Crit {c}%" if c else "Crit off"),
+                  "callback_data": f"a:crit:{c}"} for c in CRITICAL_CHOICES],
+                [{"text": ("• " if t == st.summary else "") + (t or "Summary off"), "callback_data": f"a:sum:{t or 'off'}"}
+                 # a custom time from .env is shown too, so the current choice is visible
+                 for t in SUMMARY_CHOICES + ([st.summary] if st.summary not in SUMMARY_CHOICES else [])],
+                [{"text": ("✓ " if st.flag(k) else "✗ ") + label, "callback_data": f"a:flag:{k}"}
+                 for k, label in ALERT_FLAGS.items()],
+            ]
+            return text, self._markup(rows)
+        if menu == "outputs":
+            lines, rows = ["🔌 Outputs"], []
+            for key, mode_key, name in (("ac", "acmode", "AC"), ("dc", "dcmode", "DC 12V")):
+                if self._supported(key):
+                    mode = f" ({self._label(mode_key)})" if self._supported(mode_key) else ""
+                    lines.append(f"{name}: {self._label(key)}{mode}")
+                    rows.append(self._row(key, f"{name} "))
+                    if self._supported(mode_key):
+                        rows.append(self._row(mode_key, f"{name} "))
+            return "\n".join(lines if rows else [*lines, "Not supported by this station"]), self._markup(rows)
+        if menu == "charging":
+            lines, rows = ["⚡ Charging & display"], []
+            for key, name in (("limit", "AC charge limit"), ("fast", "Fast charging"), ("disp", "Display"),
+                              ("dispto", "Screen timeout"), ("autooff", "Station auto-off")):
+                if self._supported(key):
+                    lines.append(f"{name}: {self._label(key)}")
+                    prefix = {"fast": "Fast ", "disp": "☀️ ", "dispto": "⏱ ", "autooff": "⏻ "}.get(key, "")
+                    row = self._row(key, prefix)
+                    rows += [row[:4], row[4:]] if len(row) > 5 else [row]
+            return "\n".join(lines), self._markup(rows)
+        if menu == "acoff":
+            return ("⚠️ Turn the AC output OFF?\nEverything plugged into the station outlets loses power.",
+                    self._markup([[{"text": "Yes, turn off", "callback_data": "a:ac:0!"},
+                                   {"text": "Cancel", "callback_data": "m:outputs"}]], back=False))
+        return "⚙️ Settings", self._markup([
+            [{"text": "🔔 Notifications", "callback_data": "m:notif"},
+             {"text": "🔌 Outputs", "callback_data": "m:outputs"}],
+            [{"text": "⚡ Charging & display", "callback_data": "m:charging"}]], back=False)
+
+    def act(self, key: str, value: str) -> tuple[str, str]:
+        """Apply a button press; returns (toast text, menu to show next)."""
+        st = self.settings
+        if key == "th" and int(value) in THRESHOLD_CHOICES:
+            th = set(st.thresholds) ^ {int(value)}
+            st.set("thresholds", ",".join(str(t) for t in sorted(th, reverse=True)))
+            return "Saved", "notif"
+        if key == "crit" and int(value) in CRITICAL_CHOICES:
+            st.set("critical", value)
+            return "Saved", "notif"
+        if key == "sum" and (value == "off" or value in SUMMARY_CHOICES):
+            st.set("summary", "" if value == "off" else value)
+            return "Saved", "notif"
+        if key == "flag" and value in ALERT_FLAGS:
+            st.set(value, "0" if st.flag(value) else "1")
+            return "Saved", "notif"
+        if key not in STATION_CONTROLS:
+            return "Unknown action", "root"
+        confirmed = value.endswith("!")
+        value = value.rstrip("!")
+        field, options, setter = STATION_CONTROLS[key]
+        if value not in options:
+            return "Unknown value", "root"
+        if key == "ac" and value == "0" and not confirmed:
+            return "Confirm", "acoff"
+        try:
+            ok = self.run(setter(self.device, value)) is not None
+        except Exception:
+            log.exception("command %s=%s failed", key, value)
+            ok = False
+        log.info("Command %s=%s: %s", key, value, "ok" if ok else "failed")
+        if ok:
+            self.pending[field] = (value, time.time())
+        menu = {"light": "light", "ac": "outputs", "acmode": "outputs", "dc": "outputs",
+                "dcmode": "outputs"}.get(key, "charging")
+        return (f"{options[value]} ✓" if ok else "⚠️ Command failed"), menu
+
+
 class Watchdog:
-    def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, thresholds: list[int],
-                 critical: int, name: str = "Anker", stats: Stats | None = None):
+    def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, settings: Settings,
+                 name: str = "Anker", stats: Stats | None = None):
         self.name = name
         self.stats = stats
         self.tg = tg
         self.power = power
         self.confirm_s = confirm_s
-        self.thresholds = sorted(thresholds, reverse=True)
-        self.critical = critical
+        self.settings = settings
         self.on_battery: bool | None = None  # None until the first telemetry
         self.no_grid_since: float | None = None
         self.outage_started: float | None = None  # wall clock, for the outage duration
@@ -500,8 +687,9 @@ class Watchdog:
                 # the outage ended while we were not running
                 self.on_battery, self.outage_started = True, start
             if self.on_battery:
-                self.tg.send(f"⚡ Grid power is back after {self.outage_duration()}: "
-                             f"input {ac_in} W, charge {charge}")
+                if self.settings.flag("alert_outage"):
+                    self.tg.send(f"⚡ Grid power is back after {self.outage_duration()}: "
+                                 f"input {ac_in} W, charge {charge}")
                 if self.stats:
                     self.stats.outage_ended(time.time(), total)
             if self.on_battery is not False:
@@ -523,12 +711,13 @@ class Watchdog:
                 # restarted during an outage: keep its start, do not repeat earlier alerts
                 self.outage_started = resumed
                 for name, pct in levels.items():
-                    self.fired[name] = {t for t in self.thresholds if pct <= t}
-                self.critical_fired = bool(self.critical and total <= self.critical)
+                    self.fired[name] = {t for t in self.settings.thresholds if pct <= t}
+                self.critical_fired = bool(self.settings.critical and total <= self.settings.critical)
                 log.info("Resumed outage started %s", datetime.fromtimestamp(resumed))
             else:
                 self.outage_started = time.time() - (now - self.no_grid_since)
-                self.tg.send(f"🔌 {self.name} lost AC input, running on battery: {charge}{left}")
+                if self.settings.flag("alert_outage"):
+                    self.tg.send(f"🔌 {self.name} lost AC input, running on battery: {charge}{left}")
                 if self.stats:
                     self.stats.outage_started(self.outage_started, total)
             self.power.power_saver()
@@ -537,13 +726,14 @@ class Watchdog:
             # per battery: report only the lowest crossed threshold, mark the higher ones as done
             for name, pct in levels.items():
                 fired = self.fired.setdefault(name, set())
-                crossed = [t for t in self.thresholds if pct <= t and t not in fired]
+                crossed = [t for t in self.settings.thresholds if pct <= t and t not in fired]
                 if crossed:
                     t = min(crossed)
-                    fired.update(x for x in self.thresholds if x >= t)
+                    fired.update(x for x in self.settings.thresholds if x >= t)
                     self.tg.send(f"🔋 {name.capitalize()} battery {pct}% (threshold {t}%), "
                                  f"charge {charge}{left}")
-            if self.critical and total <= self.critical and not self.critical_fired:
+            critical = self.settings.critical
+            if critical and total <= critical and not self.critical_fired:
                 self.critical_fired = True
                 self.tg.send(f"🪫 CRITICAL: charge {charge}{left}. Save your work and shut down the PC")
                 show_popup(f"{self.name}: critical battery",
@@ -615,30 +805,34 @@ async def restart_poller(api: AnkerSolixApi, device: dict, poller: asyncio.Task)
     return await start_poller(api, device)
 
 
-def send_daily_summary(tg: Telegram, stats: Stats, at: str) -> None:
-    """Once a day after SUMMARY_TIME (HH:MM, local), send yesterday's summary and chart."""
-    if not (tg.enabled and at):
+def send_daily_summary(tg: Telegram, stats: Stats | None, at: str) -> None:
+    """Once a day after the summary time (HH:MM, local), send the last 24 h summary and chart."""
+    if not (tg.enabled and stats and at):
         return
     now = datetime.now()
     if now.strftime("%H:%M") < at or stats.meta("last_summary") == now.strftime("%Y-%m-%d"):
         return
     stats.meta("last_summary", now.strftime("%Y-%m-%d"))
-    yesterday = now - timedelta(days=1)
-    tg.send(stats.summary_text(yesterday))
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tg.send(stats.summary_text(now))
     with contextlib.suppress(Exception):
-        if png := stats.chart_png(24, end=midnight.timestamp()):
-            tg.send_photo(png, f"📈 {yesterday:%d.%m}")
+        if png := stats.chart_png(24, end=now.timestamp()):
+            tg.send_photo(png, "📈 Last 24 h")
 
 
 async def run(args: argparse.Namespace) -> None:
     tg = Telegram(os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID"))
     power = PowerPlan(dry_run=args.dry_run)
     power.log_plans()
-    stats = Stats(base_dir() / "anker_ups.db")
-    watchdog = Watchdog(tg, power, confirm_s=args.confirm, thresholds=args.thresholds,
-                        critical=int(os.environ.get("CRITICAL_LEVEL") or 10), stats=stats)
-    summary_at = os.environ.get("SUMMARY_TIME", "09:00").strip()
+    # statistics and bot settings only matter with Telegram; a PC that just switches
+    # power plans (empty TG_BOT_TOKEN) runs without the database
+    stats = Stats(base_dir() / "anker_ups.db") if tg.enabled else None
+    settings = Settings(stats, {
+        "thresholds": ",".join(str(t) for t in args.thresholds),
+        "critical": os.environ.get("CRITICAL_LEVEL") or "10",
+        "summary": os.environ.get("SUMMARY_TIME", "09:00").strip(),
+        "alert_outage": "1", "alert_expansion": "1", "alert_link": "1",
+    })
+    watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats)
 
     if args.test_telegram:
         tg.send("Test message from anker_ups")
@@ -686,30 +880,19 @@ async def run(args: argparse.Namespace) -> None:
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
         loop = asyncio.get_running_loop()
-        light_keys = list(LIGHT_MODES)  # index matches the device value 0..4
+        def run_on_loop(coro):
+            # called from the Telegram thread; MQTT commands must run on the asyncio loop
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=15)
 
-        def light_state() -> str:
-            session_data = api.mqttsession.mqtt_data.get(sn, {}) if api.mqttsession else {}
-            value = as_int(session_data.get("light_mode"))
-            return light_keys[value] if value is not None and 0 <= value < len(light_keys) else ""
-
-        def set_light(mode: str) -> str:
-            # called from the Telegram thread; the MQTT command must run on the asyncio loop
-            future = asyncio.run_coroutine_threadsafe(mqtt_device.set_light(mode=mode), loop)
-            try:
-                ok = future.result(timeout=15) is not None
-            except Exception:
-                log.exception("set_light(%s) failed", mode)
-                ok = False
-            log.info("Light set to %s: %s", mode, "ok" if ok else "failed")
-            return f"Light: {LIGHT_MODES[mode]}" if ok else "⚠️ Light command failed"
-
-        tg.listen_commands(BotHandlers(status_text, light_state, set_light, stats))
+        controller = Controller(
+            settings, lambda: api.mqttsession.mqtt_data.get(sn, {}) if api.mqttsession else {},
+            run_on_loop, mqtt_device)
+        tg.listen_commands(BotHandlers(status_text, controller, stats))
         while True:
             await asyncio.sleep(1)
             session = api.mqttsession
             now = time.monotonic()
-            send_daily_summary(tg, stats, summary_at)
+            send_daily_summary(tg, stats, settings.summary)
 
             if not (session and session.is_connected()) or poller.done():
                 disconnected_since = disconnected_since or now
@@ -718,7 +901,8 @@ async def run(args: argparse.Namespace) -> None:
             silent = now - last_change
             if last_message and not link_alerted and silent > args.link_timeout:
                 link_alerted = True
-                tg.send(f"⚠️ No data from Anker for {int(silent)} s")
+                if settings.flag("alert_link"):
+                    tg.send(f"⚠️ No data from Anker for {int(silent)} s")
             # The device stops streaming after some state changes (e.g. grid coming back),
             # so ask for realtime data again as soon as the usual 3-5 s cadence breaks.
             if (session and session.is_connected() and silent > args.retrigger
@@ -754,20 +938,24 @@ async def run(args: argparse.Namespace) -> None:
                           ac_in, charging, data.get("output_power_total"),
                           data.get("photovoltaic_power"), charge or None)
                 if levels and packs != expansion:
-                    if expansion is not None and packs > expansion:
+                    if expansion is None or not settings.flag("alert_expansion"):
+                        pass
+                    elif packs > expansion:
                         tg.send(f"🔋 Expansion battery connected, charge {charge}")
-                    elif expansion is not None:
+                    else:
                         tg.send(f"🔋 Expansion battery disconnected, charge {charge}")
                     expansion = packs
                 if link_alerted:
-                    tg.send("📶 Anker data is flowing again")
+                    if settings.flag("alert_link"):
+                        tg.send("📶 Anker data is flowing again")
                     link_alerted = False
                 if levels and ac_in is not None:
                     last_levels, last_charge = levels, charge
                     # charging_status (where reported): 0 idle, 1 solar, 2 AC, 3 both
                     grid = ac_in > 0 or charging in (2, 3)
-                    stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
-                                      round(sum(levels.values()) / len(levels)), grid)
+                    if stats:
+                        stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
+                                          round(sum(levels.values()) / len(levels)), grid)
                     watchdog.evaluate(grid, ac_in, levels, charge, remaining_h)
                     continue
             # keep re-evaluating so the outage confirm timer runs between messages
