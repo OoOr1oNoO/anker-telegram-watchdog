@@ -34,11 +34,14 @@ from pathlib import Path
 
 from aiohttp import ClientSession
 from anker_solix_api.api import AnkerSolixApi
+from anker_solix_api.mqtt_factory import SolixMqttDeviceFactory
 from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
-# persistent reply keyboard with one button; its text comes back as a normal message
-STATUS_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}]],
-                              "resize_keyboard": True, "is_persistent": True})
+# persistent reply keyboard; button texts come back as normal messages.
+# Telegram gives all buttons in a row the same width, so Status gets its own row.
+MAIN_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}], [{"text": "🔦 Light"}]],
+                            "resize_keyboard": True, "is_persistent": True})
+LIGHT_MODES = {"off": "Off", "low": "Low", "medium": "Medium", "high": "High", "blinking": "Blink"}
 POWER_SAVER_GUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
 IS_WINDOWS = platform.system() == "Windows"
 REALTIME_TIMEOUT = 300  # seconds the device streams 0405 messages before the poller re-triggers
@@ -66,14 +69,15 @@ def load_env() -> None:
 class Telegram:
     """Sends messages from a background thread and retries until the network is back.
 
-    Also answers /status from the configured chat via long polling (getUpdates).
+    Also handles the bot buttons from the configured chat via long polling (getUpdates):
+    📊 Status and 🔦 Light (an inline menu of light modes).
     """
 
     def __init__(self, token: str | None, chat_id: str | None):
         self.enabled = bool(token and chat_id)
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
-        self.queue: queue.Queue[str] = queue.Queue()
+        self.queue: queue.Queue[tuple[str, str]] = queue.Queue()
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         else:
@@ -87,48 +91,84 @@ class Telegram:
     def send(self, text: str) -> None:
         log.info("ALERT: %s", text)
         if self.enabled:
-            self.queue.put(f"{time.strftime('%H:%M:%S')} {text}")
+            self.queue.put((f"{time.strftime('%H:%M:%S')} {text}", MAIN_KEYBOARD))
 
     def _worker(self) -> None:
         while True:
-            text = self.queue.get()
+            text, markup = self.queue.get()
             while True:
                 try:
                     self._call("sendMessage", {"chat_id": self.chat_id, "text": text,
-                                               "reply_markup": STATUS_KEYBOARD})
+                                               "reply_markup": markup})
                     break
                 except Exception as exc:  # no internet during outage is expected
                     log.warning("Telegram send failed (%s), retrying in 15s", exc)
                     time.sleep(15)
 
-    def listen_commands(self, status: Callable[[], str]) -> None:
+    def listen_commands(self, status: Callable[[], str], light_state: Callable[[], str],
+                        set_light: Callable[[str], str]) -> None:
         if self.enabled:
-            threading.Thread(target=self._poll_commands, args=(status,), daemon=True).start()
+            threading.Thread(target=self._poll_commands, args=(status, light_state, set_light),
+                             daemon=True).start()
 
-    def _poll_commands(self, status: Callable[[], str]) -> None:
+    @staticmethod
+    def _light_menu(current: str) -> tuple[str, str]:
+        buttons = [{"text": ("• " if key == current else "") + label, "callback_data": f"light:{key}"}
+                   for key, label in LIGHT_MODES.items()]
+        markup = json.dumps({"inline_keyboard": [buttons[:3], buttons[3:]]})
+        return f"🔦 Light: {LIGHT_MODES.get(current, '?')}", markup
+
+    def _poll_commands(self, status: Callable[[], str], light_state: Callable[[], str],
+                       set_light: Callable[[str], str]) -> None:
         with contextlib.suppress(Exception):
             self._call("setMyCommands", {"commands": json.dumps(
-                [{"command": "status", "description": "Anker status"}])})
+                [{"command": "status", "description": "Anker status"},
+                 {"command": "light", "description": "Station light"}])})
         offset = None
         while True:
             try:
-                params = {"timeout": 50, "allowed_updates": '["message"]'}
+                params = {"timeout": 50, "allowed_updates": '["message", "callback_query"]'}
                 if offset is not None:
                     params["offset"] = offset
                 updates = self._call("getUpdates", params, timeout=60).get("result", [])
             except Exception as exc:
-                log.debug("Telegram getUpdates failed (%s), retrying in 15s", exc)
+                log.warning("Telegram getUpdates failed (%s), retrying in 15s", exc)
                 time.sleep(15)
                 continue
             for upd in updates:
                 offset = upd["update_id"] + 1
-                msg = upd.get("message") or {}
-                text = (msg.get("text") or "").strip().lower()
-                # answer only the owner's chat
-                if str(msg.get("chat", {}).get("id")) != self.chat_id:
-                    continue
-                if text.startswith(("/status", "/start")) or "status" in text:
-                    self.queue.put(status())
+                try:
+                    self._handle_update(upd, status, light_state, set_light)
+                except Exception:
+                    log.exception("Telegram update handling failed")
+
+    def _handle_update(self, upd: dict, status: Callable[[], str], light_state: Callable[[], str],
+                       set_light: Callable[[str], str]) -> None:
+        if cb := upd.get("callback_query"):
+            msg = cb.get("message") or {}
+            # answer only the owner's chat
+            if str(msg.get("chat", {}).get("id")) != self.chat_id:
+                return
+            mode = (cb.get("data") or "").removeprefix("light:")
+            if mode not in LIGHT_MODES:
+                return
+            result = set_light(mode)
+            self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": result})
+            if not result.startswith("⚠️"):
+                text, markup = self._light_menu(mode)
+                with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
+                    self._call("editMessageText", {"chat_id": self.chat_id,
+                                                   "message_id": msg.get("message_id"),
+                                                   "text": text, "reply_markup": markup})
+            return
+        msg = upd.get("message") or {}
+        if str(msg.get("chat", {}).get("id")) != self.chat_id:
+            return
+        text = (msg.get("text") or "").strip().lower()
+        if text.startswith("/light") or "light" in text:
+            self.queue.put(self._light_menu(light_state()))
+        elif text.startswith(("/status", "/start")) or "status" in text:
+            self.queue.put((status(), MAIN_KEYBOARD))
 
 
 class PowerPlan:
@@ -403,7 +443,27 @@ async def run(args: argparse.Namespace) -> None:
                       f"Last data: {age} s ago"]
             return "\n".join(lines)
 
-        tg.listen_commands(status_text)
+        mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
+        loop = asyncio.get_running_loop()
+        light_keys = list(LIGHT_MODES)  # index matches the device value 0..4
+
+        def light_state() -> str:
+            session_data = api.mqttsession.mqtt_data.get(sn, {}) if api.mqttsession else {}
+            value = as_int(session_data.get("light_mode"))
+            return light_keys[value] if value is not None and 0 <= value < len(light_keys) else ""
+
+        def set_light(mode: str) -> str:
+            # called from the Telegram thread; the MQTT command must run on the asyncio loop
+            future = asyncio.run_coroutine_threadsafe(mqtt_device.set_light(mode=mode), loop)
+            try:
+                ok = future.result(timeout=15) is not None
+            except Exception:
+                log.exception("set_light(%s) failed", mode)
+                ok = False
+            log.info("Light set to %s: %s", mode, "ok" if ok else "failed")
+            return f"Light: {LIGHT_MODES[mode]}" if ok else "⚠️ Light command failed"
+
+        tg.listen_commands(status_text, light_state, set_light)
         while True:
             await asyncio.sleep(1)
             session = api.mqttsession

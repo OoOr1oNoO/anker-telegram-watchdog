@@ -6,6 +6,7 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - Charge alerts at 75 / 50 / 25 % for the main battery and each expansion battery
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
+- **🔦 Light** button: switch the station light (off / low / medium / high / blink)
 - Windows: switches to the Power saver plan during an outage and restores the previous plan afterwards
 
 Data comes from the Anker cloud (MQTT) through the unofficial
