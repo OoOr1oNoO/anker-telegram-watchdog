@@ -2,13 +2,16 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "anker-solix-api @ https://github.com/thomluther/anker-solix-api/archive/refs/tags/v3.9.1.tar.gz",
+#     "matplotlib",
 # ]
 # ///
 """Anker SOLIX power station watchdog via Anker cloud MQTT.
 
-- Telegram alert when AC input is lost / restored.
+- Telegram alert when AC input is lost / restored, with the outage duration.
+- Charge alerts per battery (default 75 / 50 / 25 %) and a critical charge alert.
+- Bot buttons: Status, Light (station light modes), Stats (charts, outages, energy).
+- Daily summary; samples and outages are kept in SQLite next to the script.
 - Switches Windows to the Power saver plan on outage, restores the previous plan after.
-- Telegram alerts at 50% and 20% battery while on battery.
 
 Config: environment variables or a .env file next to the script/exe (see .env.example).
 """
@@ -16,6 +19,7 @@ Config: environment variables or a .env file next to the script/exe (see .env.ex
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import logging.handlers
@@ -23,6 +27,7 @@ import os
 import platform
 import queue
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -30,6 +35,8 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiohttp import ClientSession
@@ -39,8 +46,14 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
 # persistent reply keyboard; button texts come back as normal messages.
 # Telegram gives all buttons in a row the same width, so Status gets its own row.
-MAIN_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}], [{"text": "🔦 Light"}]],
+MAIN_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}],
+                                         [{"text": "🔦 Light"}, {"text": "📈 Stats"}]],
                             "resize_keyboard": True, "is_persistent": True})
+STATS_MENU = json.dumps({"inline_keyboard": [
+    [{"text": "Chart 24 h", "callback_data": "stats:chart24"},
+     {"text": "Chart 7 days", "callback_data": "stats:chart168"}],
+    [{"text": "Outages", "callback_data": "stats:outages"},
+     {"text": "Energy", "callback_data": "stats:energy"}]]})
 LIGHT_MODES = {"off": "Off", "low": "Low", "medium": "Medium", "high": "High", "blinking": "Blink"}
 POWER_SAVER_GUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
 IS_WINDOWS = platform.system() == "Windows"
@@ -66,18 +79,29 @@ def load_env() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+@dataclass
+class BotHandlers:
+    """Callbacks the Telegram thread uses to read state and act on the station."""
+
+    status: Callable[[], str]
+    light_state: Callable[[], str]
+    set_light: Callable[[str], str]
+    stats: "Stats | None" = None
+
+
 class Telegram:
     """Sends messages from a background thread and retries until the network is back.
 
     Also handles the bot buttons from the configured chat via long polling (getUpdates):
-    📊 Status and 🔦 Light (an inline menu of light modes).
+    📊 Status, 🔦 Light (inline menu of light modes) and 📈 Stats (charts, outages, energy).
     """
 
     def __init__(self, token: str | None, chat_id: str | None):
         self.enabled = bool(token and chat_id)
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
-        self.queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        # ("text", text, reply_markup) or ("photo", png bytes, caption)
+        self.queue: queue.Queue[tuple[str, str | bytes, str]] = queue.Queue()
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         else:
@@ -88,42 +112,63 @@ class Telegram:
         with urllib.request.urlopen(f"{self.base}/{method}", data=data, timeout=timeout) as resp:
             return json.loads(resp.read())
 
+    def _send_photo(self, png: bytes, caption: str) -> None:
+        boundary = f"----anker{int(time.time() * 1000)}"
+        parts = []
+        for name, value in (("chat_id", self.chat_id), ("caption", caption),
+                            ("reply_markup", MAIN_KEYBOARD)):
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+                         f"{value}\r\n".encode())
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; '
+                     f'filename="chart.png"\r\nContent-Type: image/png\r\n\r\n'.encode()
+                     + png + b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode())
+        req = urllib.request.Request(f"{self.base}/sendPhoto", data=b"".join(parts),
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+
     def send(self, text: str) -> None:
         log.info("ALERT: %s", text)
         if self.enabled:
-            self.queue.put((f"{time.strftime('%H:%M:%S')} {text}", MAIN_KEYBOARD))
+            self.queue.put(("text", f"{time.strftime('%H:%M:%S')} {text}", MAIN_KEYBOARD))
+
+    def send_photo(self, png: bytes, caption: str) -> None:
+        if self.enabled:
+            self.queue.put(("photo", png, caption))
 
     def _worker(self) -> None:
         while True:
-            text, markup = self.queue.get()
+            kind, payload, extra = self.queue.get()
             while True:
                 try:
-                    self._call("sendMessage", {"chat_id": self.chat_id, "text": text,
-                                               "reply_markup": markup})
+                    if kind == "photo":
+                        self._send_photo(payload, extra)
+                    else:
+                        self._call("sendMessage", {"chat_id": self.chat_id, "text": payload,
+                                                   "reply_markup": extra})
                     break
                 except Exception as exc:  # no internet during outage is expected
                     log.warning("Telegram send failed (%s), retrying in 15s", exc)
                     time.sleep(15)
 
-    def listen_commands(self, status: Callable[[], str], light_state: Callable[[], str],
-                        set_light: Callable[[str], str]) -> None:
+    def listen_commands(self, handlers: BotHandlers) -> None:
         if self.enabled:
-            threading.Thread(target=self._poll_commands, args=(status, light_state, set_light),
-                             daemon=True).start()
+            threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
 
     @staticmethod
-    def _light_menu(current: str) -> tuple[str, str]:
+    def _light_menu(current: str) -> tuple[str, str, str]:
         buttons = [{"text": ("• " if key == current else "") + label, "callback_data": f"light:{key}"}
                    for key, label in LIGHT_MODES.items()]
         markup = json.dumps({"inline_keyboard": [buttons[:3], buttons[3:]]})
-        return f"🔦 Light: {LIGHT_MODES.get(current, '?')}", markup
+        return "text", f"🔦 Light: {LIGHT_MODES.get(current, '?')}", markup
 
-    def _poll_commands(self, status: Callable[[], str], light_state: Callable[[], str],
-                       set_light: Callable[[str], str]) -> None:
+    def _poll_commands(self, handlers: BotHandlers) -> None:
         with contextlib.suppress(Exception):
             self._call("setMyCommands", {"commands": json.dumps(
                 [{"command": "status", "description": "Anker status"},
-                 {"command": "light", "description": "Station light"}])})
+                 {"command": "light", "description": "Station light"},
+                 {"command": "stats", "description": "Charts, outages, energy"}])})
         offset = None
         while True:
             try:
@@ -138,24 +183,39 @@ class Telegram:
             for upd in updates:
                 offset = upd["update_id"] + 1
                 try:
-                    self._handle_update(upd, status, light_state, set_light)
+                    self._handle_update(upd, handlers)
                 except Exception:
                     log.exception("Telegram update handling failed")
 
-    def _handle_update(self, upd: dict, status: Callable[[], str], light_state: Callable[[], str],
-                       set_light: Callable[[str], str]) -> None:
+    def _handle_stats(self, action: str, stats: "Stats") -> str:
+        if action.startswith("chart"):
+            hours = int(action.removeprefix("chart"))
+            png = stats.chart_png(hours)
+            if png is None:
+                return "Not enough data yet"
+            self.send_photo(png, f"📈 Last {hours} h" if hours < 48 else f"📈 Last {hours // 24} days")
+            return "Chart sent"
+        text = stats.outages_text() if action == "outages" else stats.energy_text()
+        self.queue.put(("text", text, MAIN_KEYBOARD))
+        return "Sent"
+
+    def _handle_update(self, upd: dict, h: BotHandlers) -> None:
         if cb := upd.get("callback_query"):
             msg = cb.get("message") or {}
             # answer only the owner's chat
             if str(msg.get("chat", {}).get("id")) != self.chat_id:
                 return
-            mode = (cb.get("data") or "").removeprefix("light:")
-            if mode not in LIGHT_MODES:
+            kind, _, action = (cb.get("data") or "").partition(":")
+            if kind == "stats" and h.stats:
+                result = self._handle_stats(action, h.stats)
+                self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": result})
                 return
-            result = set_light(mode)
+            if kind != "light" or action not in LIGHT_MODES:
+                return
+            result = h.set_light(action)
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": result})
             if not result.startswith("⚠️"):
-                text, markup = self._light_menu(mode)
+                _, text, markup = self._light_menu(action)
                 with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
                     self._call("editMessageText", {"chat_id": self.chat_id,
                                                    "message_id": msg.get("message_id"),
@@ -166,9 +226,12 @@ class Telegram:
             return
         text = (msg.get("text") or "").strip().lower()
         if text.startswith("/light") or "light" in text:
-            self.queue.put(self._light_menu(light_state()))
+            self.queue.put(self._light_menu(h.light_state()))
+        elif text.startswith("/stats") or "stats" in text:
+            if h.stats:
+                self.queue.put(("text", "📈 Statistics", STATS_MENU))
         elif text.startswith(("/status", "/start")) or "status" in text:
-            self.queue.put((status(), MAIN_KEYBOARD))
+            self.queue.put(("text", h.status(), MAIN_KEYBOARD))
 
 
 class PowerPlan:
@@ -263,10 +326,154 @@ def show_popup(title: str, text: str) -> None:
                      args=(None, text, title, flags), daemon=True).start()
 
 
+class Stats:
+    """Minute samples and outages in SQLite next to the script, for charts and summaries.
+
+    Telemetry arrives every 3-5 s; it is averaged per minute, so energy is the sum of
+    minute averages (W * 60 s). Used from the asyncio loop and the Telegram thread.
+    """
+
+    def __init__(self, path: Path):
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS samples (ts INTEGER PRIMARY KEY, ac_in REAL, out REAL,
+                                                soc INTEGER, grid INTEGER);
+            CREATE TABLE IF NOT EXISTS outages (id INTEGER PRIMARY KEY, start INTEGER,
+                                                end INTEGER, soc_start INTEGER, soc_end INTEGER);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        self.minute: int | None = None
+        self.acc: list[tuple[float, float, int, bool]] = []
+
+    def _exec(self, sql: str, args: tuple = ()) -> list:
+        with self.lock:
+            rows = self.db.execute(sql, args).fetchall()
+            self.db.commit()
+            return rows
+
+    def add_reading(self, ac_in: float, out: float, soc: int, grid: bool) -> None:
+        minute = int(time.time() // 60)
+        if self.minute is not None and minute != self.minute and self.acc:
+            n = len(self.acc)
+            self._exec("INSERT OR REPLACE INTO samples VALUES (?, ?, ?, ?, ?)", (
+                self.minute * 60, sum(a[0] for a in self.acc) / n, sum(a[1] for a in self.acc) / n,
+                self.acc[-1][2], int(all(a[3] for a in self.acc))))
+            self.acc = []
+        self.minute = minute
+        self.acc.append((ac_in or 0, out or 0, soc, grid))
+
+    def meta(self, key: str, value: str | None = None) -> str | None:
+        if value is not None:
+            self._exec("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+            return value
+        rows = self._exec("SELECT value FROM meta WHERE key = ?", (key,))
+        return rows[0][0] if rows else None
+
+    def open_outage(self) -> int | None:
+        rows = self._exec("SELECT start FROM outages WHERE end IS NULL ORDER BY start DESC LIMIT 1")
+        return rows[0][0] if rows else None
+
+    def outage_started(self, start: float, soc: int) -> None:
+        if self.open_outage() is None:
+            self._exec("INSERT INTO outages (start, soc_start) VALUES (?, ?)", (int(start), soc))
+
+    def outage_ended(self, end: float, soc: int) -> None:
+        self._exec("UPDATE outages SET end = ?, soc_end = ? WHERE end IS NULL", (int(end), soc))
+
+    def energy_kwh(self, since: float) -> tuple[float, float]:
+        rows = self._exec("SELECT COALESCE(SUM(ac_in), 0), COALESCE(SUM(out), 0) FROM samples "
+                          "WHERE ts >= ?", (int(since),))
+        return rows[0][0] * 60 / 3.6e6, rows[0][1] * 60 / 3.6e6
+
+    def outages_between(self, start: float, end: float) -> list[tuple]:
+        # outages overlapping the window; an open one counts until now
+        return self._exec("SELECT start, COALESCE(end, CAST(strftime('%s','now') AS INTEGER)), "
+                          "soc_start, soc_end FROM outages WHERE start < ? AND "
+                          "(end IS NULL OR end > ?) ORDER BY start", (int(end), int(start)))
+
+    def energy_text(self) -> str:
+        now = datetime.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        periods = [("Today", today), ("7 days", now - timedelta(days=7)),
+                   ("30 days", now - timedelta(days=30)), ("All time", datetime.fromtimestamp(0))]
+        lines = ["⚡ Energy through the station (in / out)"]
+        for label, since in periods:
+            e_in, e_out = self.energy_kwh(since.timestamp())
+            lines.append(f"{label}: {e_in:.2f} / {e_out:.2f} kWh")
+        return "\n".join(lines)
+
+    def outages_text(self, days: int = 30, limit: int = 10) -> str:
+        now = time.time()
+        rows = self.outages_between(now - days * 86400, now)
+        if not rows:
+            return f"🔌 No outages in the last {days} days"
+        total = sum(end - start for start, end, *_ in rows)
+        lines = [f"🔌 Outages, last {days} days: {len(rows)}, total {fmt_duration(total)}"]
+        for start, end, soc_start, soc_end in rows[-limit:][::-1]:
+            when = datetime.fromtimestamp(start).strftime("%d.%m %H:%M")
+            used = f", {soc_start}% → {soc_end}%" if soc_end is not None else ", ongoing"
+            lines.append(f"{when}  {fmt_duration(end - start)}{used}")
+        return "\n".join(lines)
+
+    def summary_text(self, day: datetime) -> str:
+        start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        rows = self._exec("SELECT AVG(out), MAX(out), SUM(ac_in), SUM(out) FROM samples "
+                          "WHERE ts >= ? AND ts < ?", (int(start.timestamp()), int(end.timestamp())))
+        avg_out, max_out, sum_in, sum_out = rows[0]
+        outages = self.outages_between(start.timestamp(), end.timestamp())
+        off = sum(min(e, end.timestamp()) - max(s, start.timestamp()) for s, e, *_ in outages)
+        if avg_out is None:
+            return f"📅 {start:%d.%m}: no data"
+        return (f"📅 Summary for {start:%d.%m}\n"
+                f"Outages: {len(outages)}, without grid {fmt_duration(off)}\n"
+                f"Load: avg {avg_out:.0f} W, peak {max_out:.0f} W\n"
+                f"Energy: in {sum_in * 60 / 3.6e6:.2f} kWh, out {sum_out * 60 / 3.6e6:.2f} kWh")
+
+    def chart_png(self, hours: int, end: float | None = None) -> bytes | None:
+        import matplotlib  # noqa: PLC0415 - heavy, only needed for charts
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates  # noqa: PLC0415
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        end = end or time.time()
+        start = end - hours * 3600
+        rows = self._exec("SELECT ts, ac_in, out, soc FROM samples WHERE ts >= ? AND ts < ? "
+                          "ORDER BY ts", (int(start), int(end)))
+        if len(rows) < 2:
+            return None
+        ts = [datetime.fromtimestamp(r[0]) for r in rows]
+        fig, ax = plt.subplots(figsize=(10, 4.5), dpi=110)
+        ax.plot(ts, [r[2] for r in rows], color="#d9480f", lw=1.2, label="Load, W")
+        ax.plot(ts, [r[1] for r in rows], color="#1971c2", lw=1.0, alpha=0.8, label="Grid input, W")
+        ax.set_ylabel("W")
+        ax.set_ylim(bottom=0)
+        soc_ax = ax.twinx()
+        soc_ax.plot(ts, [r[3] for r in rows], color="#2f9e44", lw=1.5, label="Charge, %")
+        soc_ax.set_ylim(0, 105)
+        soc_ax.set_ylabel("%")
+        for s, e, *_ in self.outages_between(start, end):
+            ax.axvspan(datetime.fromtimestamp(max(s, start)), datetime.fromtimestamp(min(e, end)),
+                       color="#868e96", alpha=0.25, lw=0)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M" if hours <= 48 else "%d.%m"))
+        ax.grid(alpha=0.3)
+        handles = ax.get_legend_handles_labels()[0] + soc_ax.get_legend_handles_labels()[0]
+        ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=3,
+                  fontsize=8, frameon=False)
+        ax.set_title(f"Last {hours} h" + (" (grey: outages)" if self.outages_between(start, end) else ""))
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        return buf.getvalue()
+
+
 class Watchdog:
     def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, thresholds: list[int],
-                 critical: int, name: str = "Anker"):
+                 critical: int, name: str = "Anker", stats: Stats | None = None):
         self.name = name
+        self.stats = stats
         self.tg = tg
         self.power = power
         self.confirm_s = confirm_s
@@ -286,11 +493,17 @@ class Watchdog:
         """levels ({"main": %, "expansion": %}) drive the per-battery thresholds;
         charge is the human-readable breakdown for messages."""
         now = time.monotonic()
+        total = round(sum(levels.values()) / len(levels))
         if grid:
             self.no_grid_since = None
+            if self.on_battery is None and self.stats and (start := self.stats.open_outage()):
+                # the outage ended while we were not running
+                self.on_battery, self.outage_started = True, start
             if self.on_battery:
                 self.tg.send(f"⚡ Grid power is back after {self.outage_duration()}: "
                              f"input {ac_in} W, charge {charge}")
+                if self.stats:
+                    self.stats.outage_ended(time.time(), total)
             if self.on_battery is not False:
                 # also on the first reading, in case we were restarted during an outage
                 self.power.restore()
@@ -305,8 +518,19 @@ class Watchdog:
             self.no_grid_since = now
         if not self.on_battery and now - self.no_grid_since >= self.confirm_s:
             self.on_battery = True
-            self.outage_started = time.time() - (now - self.no_grid_since)
-            self.tg.send(f"🔌 {self.name} lost AC input, running on battery: {charge}{left}")
+            resumed = self.stats.open_outage() if self.stats else None
+            if resumed:
+                # restarted during an outage: keep its start, do not repeat earlier alerts
+                self.outage_started = resumed
+                for name, pct in levels.items():
+                    self.fired[name] = {t for t in self.thresholds if pct <= t}
+                self.critical_fired = bool(self.critical and total <= self.critical)
+                log.info("Resumed outage started %s", datetime.fromtimestamp(resumed))
+            else:
+                self.outage_started = time.time() - (now - self.no_grid_since)
+                self.tg.send(f"🔌 {self.name} lost AC input, running on battery: {charge}{left}")
+                if self.stats:
+                    self.stats.outage_started(self.outage_started, total)
             self.power.power_saver()
 
         if self.on_battery:
@@ -319,7 +543,6 @@ class Watchdog:
                     fired.update(x for x in self.thresholds if x >= t)
                     self.tg.send(f"🔋 {name.capitalize()} battery {pct}% (threshold {t}%), "
                                  f"charge {charge}{left}")
-            total = round(sum(levels.values()) / len(levels))
             if self.critical and total <= self.critical and not self.critical_fired:
                 self.critical_fired = True
                 self.tg.send(f"🪫 CRITICAL: charge {charge}{left}. Save your work and shut down the PC")
@@ -392,12 +615,30 @@ async def restart_poller(api: AnkerSolixApi, device: dict, poller: asyncio.Task)
     return await start_poller(api, device)
 
 
+def send_daily_summary(tg: Telegram, stats: Stats, at: str) -> None:
+    """Once a day after SUMMARY_TIME (HH:MM, local), send yesterday's summary and chart."""
+    if not (tg.enabled and at):
+        return
+    now = datetime.now()
+    if now.strftime("%H:%M") < at or stats.meta("last_summary") == now.strftime("%Y-%m-%d"):
+        return
+    stats.meta("last_summary", now.strftime("%Y-%m-%d"))
+    yesterday = now - timedelta(days=1)
+    tg.send(stats.summary_text(yesterday))
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    with contextlib.suppress(Exception):
+        if png := stats.chart_png(24, end=midnight.timestamp()):
+            tg.send_photo(png, f"📈 {yesterday:%d.%m}")
+
+
 async def run(args: argparse.Namespace) -> None:
     tg = Telegram(os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID"))
     power = PowerPlan(dry_run=args.dry_run)
     power.log_plans()
+    stats = Stats(base_dir() / "anker_ups.db")
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, thresholds=args.thresholds,
-                        critical=int(os.environ.get("CRITICAL_LEVEL") or 10))
+                        critical=int(os.environ.get("CRITICAL_LEVEL") or 10), stats=stats)
+    summary_at = os.environ.get("SUMMARY_TIME", "09:00").strip()
 
     if args.test_telegram:
         tg.send("Test message from anker_ups")
@@ -463,11 +704,12 @@ async def run(args: argparse.Namespace) -> None:
             log.info("Light set to %s: %s", mode, "ok" if ok else "failed")
             return f"Light: {LIGHT_MODES[mode]}" if ok else "⚠️ Light command failed"
 
-        tg.listen_commands(status_text, light_state, set_light)
+        tg.listen_commands(BotHandlers(status_text, light_state, set_light, stats))
         while True:
             await asyncio.sleep(1)
             session = api.mqttsession
             now = time.monotonic()
+            send_daily_summary(tg, stats, summary_at)
 
             if not (session and session.is_connected()) or poller.done():
                 disconnected_since = disconnected_since or now
@@ -524,6 +766,8 @@ async def run(args: argparse.Namespace) -> None:
                     last_levels, last_charge = levels, charge
                     # charging_status (where reported): 0 idle, 1 solar, 2 AC, 3 both
                     grid = ac_in > 0 or charging in (2, 3)
+                    stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
+                                      round(sum(levels.values()) / len(levels)), grid)
                     watchdog.evaluate(grid, ac_in, levels, charge, remaining_h)
                     continue
             # keep re-evaluating so the outage confirm timer runs between messages
@@ -531,8 +775,20 @@ async def run(args: argparse.Namespace) -> None:
                 watchdog.evaluate(False, 0, last_levels, last_charge)
 
 
+def apply_timezone() -> None:
+    """Use TIMEZONE from .env (e.g. Europe/Kyiv) for message and log timestamps.
+
+    Servers usually run in UTC; Windows keeps the PC's own time zone (no tzset there).
+    """
+    tz = os.environ.get("TIMEZONE", "").strip()
+    if tz and hasattr(time, "tzset"):
+        os.environ["TZ"] = tz
+        time.tzset()
+
+
 def main() -> None:
     load_env()
+    apply_timezone()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--dry-run", action="store_true", help="do not touch the power plan")
     p.add_argument("--confirm", type=float, default=10, help="seconds without AC input before outage (10)")

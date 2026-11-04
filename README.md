@@ -7,6 +7,9 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
 - **🔦 Light** button: switch the station light (off / low / medium / high / blink)
+- **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
+  energy through the station (kWh in / out) and a daily summary with a chart
+  (data is kept in `anker_ups.db` next to the script)
 - Windows: switches to the Power saver plan during an outage and restores the previous plan afterwards
 
 Data comes from the Anker cloud (MQTT) through the unofficial
@@ -49,7 +52,15 @@ journalctl -u anker-ups -f
 ```
 
 Works on Ubuntu and Oracle Linux (x86_64 and ARM), e.g. an Oracle Cloud Always Free VM.
-Re-run the installer to update the script or `.env`.
+Re-run the installer to update the script or `.env`. Set `TIMEZONE` in `.env` (servers usually
+run in UTC).
+
+On a 1 GB / 0.5 GB VM such as the Oracle `VM.Standard.E2.1.Micro`, background package-cache
+updates can push the machine into swap until it stops responding. Disabling them helps:
+
+```bash
+sudo systemctl disable --now dnf-makecache.timer oracle-cloud-agent oracle-cloud-agent-updater
+```
 
 ### Windows exe
 
