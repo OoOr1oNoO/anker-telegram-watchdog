@@ -69,11 +69,20 @@ sudo systemctl disable --now dnf-makecache.timer oracle-cloud-agent oracle-cloud
 
 ### Windows exe
 
-`build_exe.bat` builds a windowless `dist\anker_ups.exe` with PyInstaller; keep `.env` next to it.
-The exe is built without matplotlib, so charts are not available in it; without `TG_BOT_TOKEN`
-the database and statistics are switched off anyway.
-Unsigned PyInstaller builds are sometimes flagged by antivirus heuristics; running the script
-with `uv` avoids that.
+Ready-made exe files are attached to every [release](../../releases/latest); they are built from
+this repository by GitHub Actions ([workflow](.github/workflows/release.yml)), so no Python is needed:
+
+- `anker_ups.exe`: full version, including the charts in 📈 Stats
+- `anker_ups_lite.exe`: smaller, without charts; enough for a PC that only switches power plans
+  while the bot runs on a server
+- `env.example`: save it next to the exe as `.env` and fill it in
+
+The exe has no window; it writes `anker_ups.log` next to itself. Stop it with
+`taskkill /im anker_ups.exe /f`. The files are not code-signed, so Windows SmartScreen or Defender
+may warn about them (a known false positive for PyInstaller builds). If you prefer not to
+allow an unsigned exe, run the script with `uv` instead.
+
+To build it yourself, run `build_exe.bat` (lite variant) on Windows.
 
 Autostart at logon:
 

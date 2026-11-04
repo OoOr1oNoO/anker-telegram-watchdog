@@ -1,0 +1,59 @@
+name: Release
+
+# Builds the Windows exe files on a real Windows runner and attaches them to a
+# GitHub release when a version tag (v1.2.3) is pushed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ANKER_API: https://github.com/thomluther/anker-solix-api/archive/refs/tags/v3.9.1.tar.gz
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Build full exe (with charts)
+        run: >
+          uv run --python 3.12 --with pyinstaller --with ${{ env.ANKER_API }} --with matplotlib
+          pyinstaller --onefile --noconsole --name anker_ups
+          --collect-submodules anker_solix_api anker_ups.py
+
+      - name: Build lite exe (no charts)
+        run: >
+          uv run --python 3.12 --with pyinstaller --with ${{ env.ANKER_API }}
+          pyinstaller --onefile --noconsole --name anker_ups_lite
+          --collect-submodules anker_solix_api
+          --exclude-module matplotlib --exclude-module numpy --exclude-module PIL anker_ups.py
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          foreach ($exe in "dist\anker_ups.exe", "dist\anker_ups_lite.exe") {
+            if (-not (Test-Path $exe)) { throw "$exe missing" }
+            "{0}: {1:N1} MB" -f $exe, ((Get-Item $exe).Length / 1MB)
+          }
+          Copy-Item .env.example dist\env.example  # GitHub renames assets that start with a dot
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/anker_ups.exe
+            dist/anker_ups_lite.exe
+            dist/env.example
