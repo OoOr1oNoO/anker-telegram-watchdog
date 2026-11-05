@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -89,19 +90,35 @@ class BotHandlers:
     stats: "Stats | None" = None
 
 
+# button texts and commands -> action; in groups the bot sees every message (privacy mode
+# off), so only exact button texts and commands are handled, not any text with "status" in it
+BUTTON_ACTIONS = {"📊 status": "status", "🔦 light": "light", "📈 stats": "stats",
+                  "⚙️ settings": "settings", "start": "status"}
+
+
+def id_list(value: str | None) -> list[str]:
+    """Comma / space separated Telegram ids from .env."""
+    return [x for x in re.split(r"[\s,;]+", value or "") if x]
+
+
 class Telegram:
     """Sends messages from a background thread and retries until the network is back.
 
-    Also handles the bot buttons from the configured chat via long polling (getUpdates):
-    📊 Status, 🔦 Light (inline menu of light modes) and 📈 Stats (charts, outages, energy).
+    Alerts go to every chat in TG_CHAT_ID (people and / or groups). The bot buttons work in
+    each of these chats via long polling (getUpdates): 📊 Status, 🔦 Light, 📈 Stats and
+    ⚙️ Settings; replies go to the chat that asked. When TG_ADMIN_IDS is set, only those
+    users can change settings or control the station; everyone else can only look.
     """
 
-    def __init__(self, token: str | None, chat_id: str | None):
-        self.enabled = bool(token and chat_id)
+    def __init__(self, token: str | None, chat_ids: str | None, admin_ids: str | None = None):
+        self.chats = id_list(chat_ids)
+        self.admins = set(id_list(admin_ids))
+        self.enabled = bool(token and self.chats)
         self.base = f"https://api.telegram.org/bot{token}"
-        self.chat_id = str(chat_id)
-        # ("text", text, reply_markup) or ("photo", png bytes, caption)
-        self.queue: queue.Queue[tuple[str, str | bytes, str]] = queue.Queue()
+        self.username = ""  # bot username, to skip /commands@other_bot in groups
+        # (kind, payload, extra, chat): ("text", text, reply_markup, chat) or
+        # ("photo", png bytes, caption, chat); chat None = all configured chats
+        self.queue: queue.Queue[tuple[str, str | bytes, str, str | None]] = queue.Queue()
         self.has_light: Callable[[], bool | None] = lambda: None  # set by listen_commands
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
@@ -113,10 +130,10 @@ class Telegram:
         with urllib.request.urlopen(f"{self.base}/{method}", data=data, timeout=timeout) as resp:
             return json.loads(resp.read())
 
-    def _send_photo(self, png: bytes, caption: str) -> None:
+    def _send_photo(self, chat: str, png: bytes, caption: str) -> None:
         boundary = f"----anker{int(time.time() * 1000)}"
         parts = []
-        for name, value in (("chat_id", self.chat_id), ("caption", caption),
+        for name, value in (("chat_id", chat), ("caption", caption),
                             ("reply_markup", self.keyboard())):
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
                          f"{value}\r\n".encode())
@@ -133,28 +150,41 @@ class Telegram:
         return main_keyboard(self.has_light() is not False)
 
     def send(self, text: str) -> None:
+        """Alert to all configured chats."""
         log.info("ALERT: %s", text)
         if self.enabled:
-            self.queue.put(("text", f"{time.strftime('%H:%M:%S')} {text}", self.keyboard()))
+            self.queue.put(("text", f"{time.strftime('%H:%M:%S')} {text}", self.keyboard(), None))
 
-    def send_photo(self, png: bytes, caption: str) -> None:
+    def reply(self, chat: str, text: str, markup: str | None = None) -> None:
+        self.queue.put(("text", text, markup or self.keyboard(), chat))
+
+    def send_photo(self, png: bytes, caption: str, chat: str | None = None) -> None:
         if self.enabled:
-            self.queue.put(("photo", png, caption))
+            self.queue.put(("photo", png, caption, chat))
 
     def _worker(self) -> None:
         while True:
-            kind, payload, extra = self.queue.get()
-            while True:
-                try:
-                    if kind == "photo":
-                        self._send_photo(payload, extra)
-                    else:
-                        self._call("sendMessage", {"chat_id": self.chat_id, "text": payload,
-                                                   "reply_markup": extra})
-                    break
-                except Exception as exc:  # no internet during outage is expected
-                    log.warning("Telegram send failed (%s), retrying in 15s", exc)
-                    time.sleep(15)
+            kind, payload, extra, target = self.queue.get()
+            for chat in [target] if target else self.chats:
+                while True:
+                    try:
+                        if kind == "photo":
+                            self._send_photo(chat, payload, extra)
+                        else:
+                            self._call("sendMessage", {"chat_id": chat, "text": payload,
+                                                       "reply_markup": extra})
+                        break
+                    except urllib.error.HTTPError as exc:
+                        if exc.code != 429 and exc.code < 500:
+                            # wrong id, bot blocked or removed from the group: retrying won't help
+                            log.warning("Telegram send to %s failed: %s %s", chat, exc.code,
+                                        exc.read().decode(errors="replace")[:200])
+                            break
+                        log.warning("Telegram send failed (%s), retrying in 15s", exc)
+                        time.sleep(15)
+                    except Exception as exc:  # no internet during outage is expected
+                        log.warning("Telegram send failed (%s), retrying in 15s", exc)
+                        time.sleep(15)
 
     def listen_commands(self, handlers: BotHandlers) -> None:
         self.has_light = handlers.controller.has_light
@@ -162,6 +192,8 @@ class Telegram:
             threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
 
     def _poll_commands(self, handlers: BotHandlers) -> None:
+        with contextlib.suppress(Exception):
+            self.username = self._call("getMe", {})["result"]["username"].lower()
         with contextlib.suppress(Exception):
             self._call("setMyCommands", {"commands": json.dumps(
                 [{"command": "status", "description": "Anker status"},
@@ -186,57 +218,77 @@ class Telegram:
                 except Exception:
                     log.exception("Telegram update handling failed")
 
-    def _handle_stats(self, action: str, stats: "Stats") -> str:
+    def _handle_stats(self, chat: str, action: str, stats: "Stats") -> str:
         if action.startswith("chart"):
             hours = int(action.removeprefix("chart"))
             png = stats.chart_png(hours)
             if png is None:
                 return "Not enough data yet"
-            self.send_photo(png, f"📈 Last {hours} h" if hours < 48 else f"📈 Last {hours // 24} days")
+            self.send_photo(png, f"📈 Last {hours} h" if hours < 48 else f"📈 Last {hours // 24} days", chat)
             return "Chart sent"
-        text = stats.outages_text() if action == "outages" else stats.energy_text()
-        self.queue.put(("text", text, self.keyboard()))
+        self.reply(chat, stats.outages_text() if action == "outages" else stats.energy_text())
         return "Sent"
 
     def _edit(self, msg: dict, view: tuple[str, str]) -> None:
         with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
-            self._call("editMessageText", {"chat_id": self.chat_id, "message_id": msg.get("message_id"),
+            self._call("editMessageText", {"chat_id": msg["chat"]["id"], "message_id": msg.get("message_id"),
                                            "text": view[0], "reply_markup": view[1]})
+
+    def _allowed_chat(self, msg: dict) -> str | None:
+        chat = str(msg.get("chat", {}).get("id"))
+        if chat in self.chats:
+            return chat
+        # logged so the id of a new group or person can be copied into TG_CHAT_ID
+        log.info("Ignoring Telegram chat %s (%s), not in TG_CHAT_ID", chat,
+                 msg.get("chat", {}).get("title") or msg.get("chat", {}).get("username") or "?")
+        return None
+
+    def _action(self, text: str) -> str | None:
+        text = text.strip().lower()
+        if text.startswith("/"):
+            cmd, _, bot = text[1:].split()[0].partition("@") if len(text) > 1 else ("", "", "")
+            if bot and self.username and bot != self.username:
+                return None  # command for another bot in the group
+            return BUTTON_ACTIONS.get(cmd, cmd if cmd in BUTTON_ACTIONS.values() else None)
+        return BUTTON_ACTIONS.get(text)
 
     def _handle_update(self, upd: dict, h: BotHandlers) -> None:
         if cb := upd.get("callback_query"):
             msg = cb.get("message") or {}
-            # answer only the owner's chat
-            if str(msg.get("chat", {}).get("id")) != self.chat_id:
+            if not (chat := self._allowed_chat(msg)):
                 return
             kind, _, rest = (cb.get("data") or "").partition(":")
             toast = ""
             if kind == "stats" and h.stats:
-                toast = self._handle_stats(rest, h.stats)
+                toast = self._handle_stats(chat, rest, h.stats)
             elif kind == "m":
                 self._edit(msg, h.controller.render(rest))
             elif kind == "a":
-                key, _, value = rest.partition(":")
-                toast, menu = h.controller.act(key, value)
-                self._edit(msg, h.controller.render(menu))
+                user = str(cb.get("from", {}).get("id"))
+                if self.admins and user not in self.admins:
+                    toast = "Only admins can change this"
+                    log.info("Denied %s from user %s", rest, user)
+                else:
+                    key, _, value = rest.partition(":")
+                    toast, menu = h.controller.act(key, value)
+                    self._edit(msg, h.controller.render(menu))
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})
             return
         msg = upd.get("message") or {}
-        if str(msg.get("chat", {}).get("id")) != self.chat_id:
+        if not (action := self._action(msg.get("text") or "")) or not (chat := self._allowed_chat(msg)):
             return
-        text = (msg.get("text") or "").strip().lower()
-        if text.startswith("/light") or "light" in text:
+        if action == "light":
             if self.has_light() is False:  # also refreshes the keyboard without the button
-                self.queue.put(("text", "This station has no light", self.keyboard()))
+                self.reply(chat, "This station has no light")
             else:
-                self.queue.put(("text", *h.controller.render("light")))
-        elif text.startswith("/settings") or "settings" in text:
-            self.queue.put(("text", *h.controller.render("root")))
-        elif text.startswith("/stats") or "stats" in text:
+                self.reply(chat, *h.controller.render("light"))
+        elif action == "settings":
+            self.reply(chat, *h.controller.render("root"))
+        elif action == "stats":
             if h.stats:
-                self.queue.put(("text", "📈 Statistics", STATS_MENU))
-        elif text.startswith(("/status", "/start")) or "status" in text:
-            self.queue.put(("text", h.status(), self.keyboard()))
+                self.reply(chat, "📈 Statistics", STATS_MENU)
+        else:
+            self.reply(chat, h.status())
 
 
 class PowerPlan:
@@ -839,7 +891,8 @@ def send_daily_summary(tg: Telegram, stats: Stats | None, at: str) -> None:
 
 
 async def run(args: argparse.Namespace) -> None:
-    tg = Telegram(os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID"))
+    tg = Telegram(os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID"),
+                  os.environ.get("TG_ADMIN_IDS"))
     power = PowerPlan(dry_run=args.dry_run)
     power.log_plans()
     # statistics and bot settings only matter with Telegram; a PC that just switches

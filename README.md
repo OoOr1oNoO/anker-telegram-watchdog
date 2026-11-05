@@ -15,6 +15,7 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   for confirmation), AC charge limit, fast charging, display brightness and timeout, auto-off.
   Only the controls the station reports are shown. Settings are stored in the database;
   `.env` values are the defaults
+- Several people and / or Telegram groups, optionally with admin-only controls
 - Windows: switches to the Power saver plan during an outage and restores the previous plan afterwards
 
 Data comes from the Anker cloud (MQTT) through the unofficial
@@ -46,6 +47,20 @@ grid is up; keep a load on the station or check the log before relying on it.
 
 Options: `--thresholds 75 50 25`, `--confirm 10` (seconds without input before an outage),
 `--link-timeout 120`, `--test-telegram`. A log is written to `anker_ups.log` next to the script.
+
+### Several people or a group
+
+`TG_CHAT_ID` takes several ids separated by commas: people (each has to send the bot `/start`
+once) and / or groups. Alerts go to every chat, and the buttons work in each one; replies go to
+the chat that asked.
+
+For a group: add the bot to the group and, in @BotFather, turn privacy mode off
+(`/setprivacy` → Disable) or make the bot a group admin, otherwise it does not see the keyboard
+buttons. The group id starts with `-100`; when someone presses a button in a chat that is not in
+`TG_CHAT_ID`, the bot logs its id, so you can copy it from the log.
+
+By default everyone in these chats can change settings and control the station. To limit that,
+list the allowed user ids in `TG_ADMIN_IDS`; others can still view status, stats and menus.
 
 ### Linux server (systemd)
 
