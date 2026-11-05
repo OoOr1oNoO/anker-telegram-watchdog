@@ -49,7 +49,7 @@ from anker_solix_api.mqtt_factory import SolixMqttDeviceFactory
 from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # translations.py next to the script
-from translations import ENERGY_UNITS, LANG_NAMES, LANGS, MONTHS, TEXTS, UNITS  # noqa: E402
+from translations import ENERGY_UNITS, LANG_NAMES, LANGS, MONTHS, SHORT_UNITS, TEXTS, UNITS  # noqa: E402
 
 POWER_SAVER_GUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
 IS_WINDOWS = platform.system() == "Windows"
@@ -84,9 +84,9 @@ class Lang:
         d, h = divmod(hours, 24)
         return f"{d}{d_u} {h}{h_u} ({hours}{h_u} {m:02d}{m_u})"
 
-    def short(self, seconds: int) -> str:
-        """20s, 5m, 2h for setting buttons."""
-        _, h_u, m_u, s_u = UNITS[self.code]
+    def short(self, seconds: int, compact: bool = False) -> str:
+        """20 s, 5 min, 2 h for settings; compact (20s, 5min) for narrow buttons."""
+        s_u, m_u, h_u = SHORT_UNITS[self.code] if compact else UNITS[self.code][:0:-1]
         if seconds < 60:
             return f"{seconds}{s_u}"
         return f"{seconds // 60}{m_u}" if seconds < 3600 else f"{seconds // 3600}{h_u}"
@@ -952,6 +952,14 @@ STATION_CONTROLS: dict[str, tuple[str, list[str], Callable, Callable]] = {
 }
 
 
+# shorter button labels where a row has many buttons; the menu text keeps the full words
+BUTTON_LABELS: dict[str, Callable[[Lang, str], str]] = {
+    "disp": lambda L, v: "✗" if v == "0" else v,  # brightness levels 1-3
+    "dispto": lambda L, v: L.short(int(v), compact=True),
+    "autooff": lambda L, v: "✗" if v == "0" else L.short(int(v) * 60, compact=True),
+}
+
+
 class Controller:
     """Renders the Settings / Light / Users / Language menus and applies button presses.
 
@@ -994,7 +1002,10 @@ class Controller:
     def _row(self, key: str, L: Lang, prefix: str = "") -> list[dict]:
         current = self._state(key)
         _, values, label, _ = STATION_CONTROLS[key]
-        return [{"text": ("• " if v == current else "") + prefix + label(L, v), "callback_data": f"a:{key}:{v}"}
+        label = BUTTON_LABELS.get(key, label)
+        # rows of 4-5 buttons have ~6 characters each on a phone: no space after the marker
+        mark = "•" if len(values) >= 4 else "• "
+        return [{"text": (mark if v == current else "") + prefix + label(L, v), "callback_data": f"a:{key}:{v}"}
                 for v in values]
 
     @staticmethod
@@ -1013,15 +1024,18 @@ class Controller:
             on_off = {True: L.t("on"), False: L.t("off")}
             text = "\n".join([
                 L.t("n_title"),
-                L.t("n_charge", v=", ".join(f"{t}%" for t in th) or L.t("off")),
-                L.t("n_critical", v=f"{st.critical}%" if st.critical else L.t("off")),
-                L.t("n_summary", v=L.t("n_summary_v", t=st.summary) if st.summary else L.t("off")),
+                # the icons match the button rows below
+                "🔋 " + L.t("n_charge", v=", ".join(f"{t}%" for t in th) or L.t("off")),
+                "🪫 " + L.t("n_critical", v=f"{st.critical}%" if st.critical else L.t("off")),
+                "📅 " + L.t("n_summary", v=L.t("n_summary_v", t=st.summary) if st.summary else L.t("off")),
                 *(L.t("n_flag", label=L.t(label), v=on_off[st.flag(k)]) for k, label in ALERT_FLAGS.items())])
             rows = [
                 [{"text": ("✓" if t in th else "") + f"{t}%", "callback_data": f"a:th:{t}"} for t in THRESHOLD_CHOICES],
-                [{"text": ("• " if c == st.critical else "") + (L.t("crit_btn", c=c) if c else L.t("crit_off")),
+                # icons instead of words: five buttons in a row leave ~6 characters on a phone,
+                # so the icon is on the first ("off") button only and marks the whole row
+                [{"text": ("•" if c == st.critical else "") + (f"{c}%" if c else "🪫✗"),
                   "callback_data": f"a:crit:{c}"} for c in CRITICAL_CHOICES],
-                [{"text": ("• " if t == st.summary else "") + (t or L.t("sum_off")),
+                [{"text": ("•" if t == st.summary else "") + (t or "📅✗"),
                   "callback_data": f"a:sum:{t or 'off'}"}
                  # a custom time from .env is shown too, so the current choice is visible
                  for t in SUMMARY_CHOICES + ([st.summary] if st.summary not in SUMMARY_CHOICES else [])],
@@ -1044,8 +1058,10 @@ class Controller:
             for key, name in (("limit", "c_limit"), ("fast", "c_fast"), ("disp", "c_disp"),
                               ("dispto", "c_dispto"), ("autooff", "c_autooff")):
                 if self._supported(key):
-                    lines.append(f"{L.t(name)}: {self._label(key, L)}")
-                    prefix = {"fast": "⚡ ", "disp": "☀️ ", "dispto": "⏱ ", "autooff": "⏻ "}.get(key, "")
+                    # the same icon starts the line and the buttons of that setting
+                    icon = {"limit": "🔌", "fast": "⚡", "disp": "☀️", "dispto": "⏱", "autooff": "⏻"}[key]
+                    lines.append(f"{icon} {L.t(name)}: {self._label(key, L)}")
+                    prefix = {"fast": "⚡ ", "disp": "☀️", "dispto": "⏱", "autooff": "⏻"}.get(key, "")
                     row = self._row(key, L, prefix)
                     rows += [row[:4], row[4:]] if len(row) > 5 else [row]
             return "\n".join(lines), self._markup(L, rows)

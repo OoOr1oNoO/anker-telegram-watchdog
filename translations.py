@@ -18,6 +18,10 @@ UNITS = {
     "es": (" d", " h", " min", " s"),
 }
 
+# compact units for narrow buttons (second, minute, hour), written without a space
+SHORT_UNITS = {"en": ("s", "m", "h"), "uk": ("с", "хв", "год"), "ru": ("с", "мин", "ч"),
+               "pl": ("s", "min", "h"), "de": ("s", "min", "h"), "es": ("s", "min", "h")}
+
 # energy units: kWh, Wh
 ENERGY_UNITS = {"uk": ("кВт·год", "Вт·год"), "ru": ("кВт·ч", "Вт·ч")}
 
@@ -263,10 +267,6 @@ TEXTS: dict[str, tuple[str, str, str, str, str, str]] = {
     "f_expansion": ("Expansion", "Дод. батарея", "Доп. батарея", "Bateria dodatkowa", "Zusatzakku",
                     "Batería adicional"),
     "f_link": ("No data", "Немає даних", "Нет данных", "Brak danych", "Keine Daten", "Sin datos"),
-    "crit_btn": ("Crit {c}%", "Крит {c}%", "Крит {c}%", "Kryt. {c}%", "Krit. {c}%", "Crít. {c}%"),
-    "crit_off": ("Crit off", "Крит вимк.", "Крит выкл.", "Kryt. wył.", "Krit. aus", "Crít. no"),
-    "sum_off": ("Summary off", "Без підсумку", "Без сводки", "Bez podsumowania", "Keine Zusammenf.",
-                "Sin resumen"),
 
     # outputs, charging, light
     "o_unsupported": ("Not supported by this station", "Ця станція не підтримує",
