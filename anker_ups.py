@@ -46,10 +46,11 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
 # persistent reply keyboard; button texts come back as normal messages.
 # Telegram gives all buttons in a row the same width, so Status gets its own row.
-MAIN_KEYBOARD = json.dumps({"keyboard": [[{"text": "📊 Status"}],
-                                         [{"text": "🔦 Light"}, {"text": "📈 Stats"},
-                                          {"text": "⚙️ Settings"}]],
-                            "resize_keyboard": True, "is_persistent": True})
+def main_keyboard(light: bool = True) -> str:
+    """Light is left out once the station is known to have none (no light_mode field)."""
+    row = [{"text": "📈 Stats"}, {"text": "⚙️ Settings"}]
+    return json.dumps({"keyboard": [[{"text": "📊 Status"}], [{"text": "🔦 Light"}, *row] if light else row],
+                       "resize_keyboard": True, "is_persistent": True})
 STATS_MENU = json.dumps({"inline_keyboard": [
     [{"text": "Chart 24 h", "callback_data": "stats:chart24"},
      {"text": "Chart 7 days", "callback_data": "stats:chart168"}],
@@ -101,6 +102,7 @@ class Telegram:
         self.chat_id = str(chat_id)
         # ("text", text, reply_markup) or ("photo", png bytes, caption)
         self.queue: queue.Queue[tuple[str, str | bytes, str]] = queue.Queue()
+        self.has_light: Callable[[], bool | None] = lambda: None  # set by listen_commands
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         else:
@@ -115,7 +117,7 @@ class Telegram:
         boundary = f"----anker{int(time.time() * 1000)}"
         parts = []
         for name, value in (("chat_id", self.chat_id), ("caption", caption),
-                            ("reply_markup", MAIN_KEYBOARD)):
+                            ("reply_markup", self.keyboard())):
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
                          f"{value}\r\n".encode())
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; '
@@ -127,10 +129,13 @@ class Telegram:
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp.read()
 
+    def keyboard(self) -> str:
+        return main_keyboard(self.has_light() is not False)
+
     def send(self, text: str) -> None:
         log.info("ALERT: %s", text)
         if self.enabled:
-            self.queue.put(("text", f"{time.strftime('%H:%M:%S')} {text}", MAIN_KEYBOARD))
+            self.queue.put(("text", f"{time.strftime('%H:%M:%S')} {text}", self.keyboard()))
 
     def send_photo(self, png: bytes, caption: str) -> None:
         if self.enabled:
@@ -152,6 +157,7 @@ class Telegram:
                     time.sleep(15)
 
     def listen_commands(self, handlers: BotHandlers) -> None:
+        self.has_light = handlers.controller.has_light
         if self.enabled:
             threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
 
@@ -189,7 +195,7 @@ class Telegram:
             self.send_photo(png, f"📈 Last {hours} h" if hours < 48 else f"📈 Last {hours // 24} days")
             return "Chart sent"
         text = stats.outages_text() if action == "outages" else stats.energy_text()
-        self.queue.put(("text", text, MAIN_KEYBOARD))
+        self.queue.put(("text", text, self.keyboard()))
         return "Sent"
 
     def _edit(self, msg: dict, view: tuple[str, str]) -> None:
@@ -220,14 +226,17 @@ class Telegram:
             return
         text = (msg.get("text") or "").strip().lower()
         if text.startswith("/light") or "light" in text:
-            self.queue.put(("text", *h.controller.render("light")))
+            if self.has_light() is False:  # also refreshes the keyboard without the button
+                self.queue.put(("text", "This station has no light", self.keyboard()))
+            else:
+                self.queue.put(("text", *h.controller.render("light")))
         elif text.startswith("/settings") or "settings" in text:
             self.queue.put(("text", *h.controller.render("root")))
         elif text.startswith("/stats") or "stats" in text:
             if h.stats:
                 self.queue.put(("text", "📈 Statistics", STATS_MENU))
         elif text.startswith(("/status", "/start")) or "status" in text:
-            self.queue.put(("text", h.status(), MAIN_KEYBOARD))
+            self.queue.put(("text", h.status(), self.keyboard()))
 
 
 class PowerPlan:
@@ -542,6 +551,7 @@ class Controller:
         self.data = data  # latest MQTT values of the station
         self.run = run  # run(coroutine) -> result, on the asyncio loop
         self.device = device
+        self.light_seen = False
         self.pending: dict[str, tuple[str, float]] = {}  # field -> (value, time) until telemetry catches up
 
     def _state(self, key: str) -> str | None:
@@ -553,6 +563,15 @@ class Controller:
 
     def _label(self, key: str) -> str:
         return STATION_CONTROLS[key][1].get(self._state(key) or "", "?")
+
+    def has_light(self) -> bool | None:
+        """None until the first battery telemetry, then whether the station reports a light."""
+        data = self.data()
+        if "light_mode" in data:
+            self.light_seen = True
+        if self.light_seen:
+            return True
+        return False if ("main_battery_soc" in data or "battery_soc" in data) else None
 
     def _supported(self, key: str) -> bool:
         return STATION_CONTROLS[key][0] in self.data()
