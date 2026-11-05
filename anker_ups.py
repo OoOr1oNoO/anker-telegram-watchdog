@@ -439,6 +439,10 @@ class Stats:
         if self.open_outage() is None:
             self._exec("INSERT INTO outages (start, soc_start) VALUES (?, ?)", (int(start), soc))
 
+    def last_outage_end(self) -> int | None:
+        rows = self._exec("SELECT MAX(end) FROM outages WHERE end IS NOT NULL")
+        return rows[0][0] if rows else None
+
     def outage_ended(self, end: float, soc: int) -> None:
         self._exec("UPDATE outages SET end = ?, soc_end = ? WHERE end IS NULL", (int(end), soc))
 
@@ -563,7 +567,8 @@ class Settings:
 THRESHOLD_CHOICES = [90, 75, 50, 25, 10]
 CRITICAL_CHOICES = [0, 5, 10, 15, 20]
 SUMMARY_CHOICES = ["", "07:00", "10:00", "19:00", "23:00"]
-ALERT_FLAGS = {"alert_outage": "Outage", "alert_expansion": "Expansion", "alert_link": "No data"}
+ALERT_FLAGS = {"alert_outage": "Outage", "alert_full": "Full charge", "alert_expansion": "Expansion",
+               "alert_link": "No data"}
 
 # station controls: key -> (state field, {button value: label}, setter); values are strings
 # from callback data, the setter turns them into an MQTT command on the device object
@@ -657,8 +662,8 @@ class Controller:
                 [{"text": ("• " if t == st.summary else "") + (t or "Summary off"), "callback_data": f"a:sum:{t or 'off'}"}
                  # a custom time from .env is shown too, so the current choice is visible
                  for t in SUMMARY_CHOICES + ([st.summary] if st.summary not in SUMMARY_CHOICES else [])],
-                [{"text": ("✓ " if st.flag(k) else "✗ ") + label, "callback_data": f"a:flag:{k}"}
-                 for k, label in ALERT_FLAGS.items()],
+                *([{"text": ("✓ " if st.flag(k) else "✗ ") + label, "callback_data": f"a:flag:{k}"}
+                   for k, label in list(ALERT_FLAGS.items())[i:i + 2]] for i in range(0, len(ALERT_FLAGS), 2)),
             ]
             return text, self._markup(rows)
         if menu == "outputs":
@@ -742,6 +747,15 @@ class Watchdog:
         self.outage_started: float | None = None  # wall clock, for the outage duration
         self.fired: dict[str, set[int]] = {}  # battery name -> thresholds already reported
         self.critical_fired = False
+        # wall clock when the grid came back after an outage, until the battery is full;
+        # kept in the DB so a restart while charging still sends the full-charge alert
+        saved = stats.meta("charge_pending") if stats else None
+        self.charge_pending: float | None = float(saved) if saved else None
+
+    def _set_charge_pending(self, value: float | None) -> None:
+        self.charge_pending = value
+        if self.stats:
+            self.stats.meta("charge_pending", "" if value is None else str(int(value)))
 
     def outage_duration(self) -> str:
         return fmt_duration(time.time() - self.outage_started) if self.outage_started else "?"
@@ -763,6 +777,14 @@ class Watchdog:
                                  f"input {ac_in} W, charge {charge}")
                 if self.stats:
                     self.stats.outage_ended(time.time(), total)
+                if min(levels.values()) < 100:  # nothing to report after a short outage
+                    self._set_charge_pending(time.time())
+            elif self.charge_pending and min(levels.values()) >= 100:
+                # once per outage: the station hovers 99-100 % when full, so no repeats
+                if self.settings.flag("alert_full"):
+                    self.tg.send(f"🔋 Fully charged in {fmt_duration(time.time() - self.charge_pending)} "
+                                 f"after the outage: {charge}")
+                self._set_charge_pending(None)
             if self.on_battery is not False:
                 # also on the first reading, in case we were restarted during an outage
                 self.power.restore()
@@ -787,8 +809,13 @@ class Watchdog:
                 log.info("Resumed outage started %s", datetime.fromtimestamp(resumed))
             else:
                 self.outage_started = time.time() - (now - self.no_grid_since)
+                self._set_charge_pending(None)  # charging did not finish before this outage
+                # how long the grid was up: since the end of the previous outage
+                last_end = self.stats.last_outage_end() if self.stats else None
+                uptime = (f" after {fmt_duration(self.outage_started - last_end)} of grid power"
+                          if last_end and self.outage_started > last_end else "")
                 if self.settings.flag("alert_outage"):
-                    self.tg.send(f"🔌 {self.name} lost AC input, running on battery: {charge}{left}")
+                    self.tg.send(f"🔌 {self.name} lost AC input{uptime}, running on battery: {charge}{left}")
                 if self.stats:
                     self.stats.outage_started(self.outage_started, total)
             self.power.power_saver()
@@ -902,7 +929,7 @@ async def run(args: argparse.Namespace) -> None:
         "thresholds": ",".join(str(t) for t in args.thresholds),
         "critical": os.environ.get("CRITICAL_LEVEL") or "10",
         "summary": os.environ.get("SUMMARY_TIME", "09:00").strip(),
-        "alert_outage": "1", "alert_expansion": "1", "alert_link": "1",
+        "alert_outage": "1", "alert_full": "1", "alert_expansion": "1", "alert_link": "1",
     })
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats)
 

@@ -2,7 +2,9 @@
 
 Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 
-- Alert when the station loses AC input and when grid power comes back (with outage duration)
+- Alert when the station loses AC input (with how long the grid was up) and when grid power
+  comes back (with the outage duration)
+- Full-charge alert once the station has recharged to 100 % after an outage (once per outage)
 - Charge alerts for the main battery and each expansion battery (default 75 / 50 / 25 %)
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
