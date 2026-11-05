@@ -935,6 +935,7 @@ async def run(args: argparse.Namespace) -> None:
         last_restart = last_retrigger = time.monotonic()
         link_alerted = False
         snapshot: dict = {}
+        last_plug: int | None = None
 
         def status_text() -> str:
             if not snapshot:
@@ -1023,8 +1024,15 @@ async def run(args: argparse.Namespace) -> None:
                     link_alerted = False
                 if levels and ac_in is not None:
                     last_levels, last_charge = levels, charge
-                    # charging_status (where reported): 0 idle, 1 solar, 2 AC, 3 both
-                    grid = ac_in > 0 or charging in (2, 3)
+                    # charging_status (where reported): 0 idle, 1 solar, 2 AC, 3 both.
+                    # ac_input_plug_status (C1000 Gen 2, C2000 Gen 2, C300...): 1 = AC connected;
+                    # these models have no charging_status, and with a full battery and a small
+                    # load the AC input drops to 0 W while the grid is up
+                    plug = as_int(data.get("ac_input_plug_status"))
+                    if plug != last_plug:
+                        log.info("ac_input_plug_status %s -> %s (ac_in %s W)", last_plug, plug, ac_in)
+                        last_plug = plug
+                    grid = ac_in > 0 or charging in (2, 3) or plug == 1
                     if stats:
                         stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
                                           round(sum(levels.values()) / len(levels)), grid)

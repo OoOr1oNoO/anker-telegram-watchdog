@@ -28,8 +28,9 @@ Any power station that anker-solix-api supports over MQTT, e.g. SOLIX C300, C800
 C1000 Gen 2, C2000 Gen 2, F2000, F2600, F3800. Tested on a **SOLIX C1000X (A1761) with an
 expansion battery**; other models use the same field names but have not been tested.
 
-Grid loss is detected from the AC input power (and the charging status where the model reports
-it). With a full battery and no load on the outputs some models may report 0 W input while the
+Grid loss is detected from the AC input power, plus the charging status or the AC input plug
+status where the model reports them (e.g. C1000 Gen 2 and C2000 Gen 2 report the plug status).
+Models that report neither may show 0 W input with a full battery and a small load while the
 grid is up; keep a load on the station or check the log before relying on it.
 
 ## Setup
