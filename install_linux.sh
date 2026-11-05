@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs anker_ups as a systemd service on a Linux VM (Ubuntu / Oracle Linux, x86_64 or ARM).
-# Usage (from the folder with anker_ups.py and .env):  sudo bash install_linux.sh
+# Usage (from the folder with anker_ups.py, translations.py and .env):  sudo bash install_linux.sh
 # Re-run it to update the script or .env; it restarts the service.
 set -euo pipefail
 
@@ -9,7 +9,9 @@ APP_USER=anker
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run with sudo"; exit 1; }
-[ -f "$SRC_DIR/anker_ups.py" ] || { echo "anker_ups.py not found next to this script"; exit 1; }
+for f in anker_ups.py translations.py; do
+    [ -f "$SRC_DIR/$f" ] || { echo "$f not found next to this script"; exit 1; }
+done
 [ -f "$SRC_DIR/.env" ] || { echo ".env not found next to this script"; exit 1; }
 
 command -v curl >/dev/null || { (apt-get update && apt-get install -y curl) || dnf install -y curl; }
@@ -24,7 +26,7 @@ command -v restorecon >/dev/null && restorecon -F /usr/local/bin/uv /usr/local/b
 
 id "$APP_USER" >/dev/null 2>&1 || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
 mkdir -p "$APP_DIR"
-install -m 0644 "$SRC_DIR/anker_ups.py" "$APP_DIR/anker_ups.py"
+install -m 0644 "$SRC_DIR/anker_ups.py" "$SRC_DIR/translations.py" "$APP_DIR/"
 install -m 0600 "$SRC_DIR/.env" "$APP_DIR/.env"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 

@@ -10,14 +10,19 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
 - **🔦 Light** button: switch the station light (off / low / medium / high / blink)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
-  energy through the station (kWh in / out) and a daily summary with a chart
-  (data is kept in `anker_ups.db` next to the script)
+  outages and energy by month, energy through the station (kWh in / out) and a daily summary
+  with a chart (data is kept in `anker_ups.db` next to the script)
 - **⚙️ Settings** button: charge alert thresholds, critical level, daily summary time and which
   alerts to send; station outputs (AC / DC 12V on-off, Normal / Smart mode; turning AC off asks
   for confirmation), AC charge limit, fast charging, display brightness and timeout, auto-off.
   Only the controls the station reports are shown. Settings are stored in the database;
   `.env` values are the defaults
-- Several people and / or Telegram groups, optionally with admin-only controls
+- Several people and / or Telegram groups; admins and users; access closed, on request or open,
+  managed from the bot (**⚙️ Settings → 👥 Users**)
+- Messages in English, Ukrainian, Russian, Polish, German or Spanish, chosen per chat
+  automatically from the Telegram app language or in **⚙️ Settings → 🌐 Language**
+- Optional dead man's switch: pings a [healthchecks.io](https://healthchecks.io) check, which
+  alerts you when the server or the bot stops
 - Windows: switches to the Power saver plan during an outage and restores the previous plan afterwards
 
 Data comes from the Anker cloud (MQTT) through the unofficial
@@ -48,26 +53,40 @@ grid is up; keep a load on the station or check the log before relying on it.
    uv run anker_ups.py                # normal run
    ```
 
-Options: `--thresholds 75 50 25`, `--confirm 10` (seconds without input before an outage),
-`--link-timeout 120`, `--test-telegram`. A log is written to `anker_ups.log` next to the script.
+Keep `translations.py` next to `anker_ups.py`. Options: `--thresholds 75 50 25`, `--confirm 10`
+(seconds without input before an outage), `--link-timeout 120`, `--test-telegram`. A log is
+written to `anker_ups.log` next to the script.
 
-### Several people or a group
+### Users, groups and access
 
-`TG_CHAT_ID` takes several ids separated by commas: people (each has to send the bot `/start`
-once) and / or groups. Alerts go to every chat, and the buttons work in each one; replies go to
-the chat that asked.
+The people and groups in `TG_CHAT_ID` get alerts and can use the buttons; group ids start with
+`-100`. Admins (`TG_ADMIN_IDS`; when it is empty, the people in `TG_CHAT_ID`) can also change
+settings and control the station. Everything else is managed in **⚙️ Settings → 👥 Users**
+(admins only):
+
+- access mode: **Closed** (default: only people you add; strangers get their id to send you),
+  **Requests** (a stranger presses `/start`, admins get Allow / Deny buttons) or **Open**
+  (anyone who starts the bot gets alerts and viewing, without control);
+- add a person or group by id, make someone an admin, remove them.
+
+Users are stored in the database. The ids from `.env` are applied again on every start and can
+only be changed in `.env`, so you cannot lock yourself out from the bot.
 
 For a group: add the bot to the group and, in @BotFather, turn privacy mode off
 (`/setprivacy` → Disable) or make the bot a group admin, otherwise it does not see the keyboard
-buttons. The group id starts with `-100`; when someone presses a button in a chat that is not in
-`TG_CHAT_ID`, the bot logs its id, so you can copy it from the log.
+buttons. Adding the bot to a group counts as a request in the Requests mode; otherwise add the
+group id in 👥 Users (the bot logs the id of every chat it ignores).
 
-By default everyone in these chats can change settings and control the station. To limit that,
-list the allowed user ids in `TG_ADMIN_IDS`; others can still view status, stats and menus.
+### Healthcheck
+
+If the server or the bot dies, nobody is left to send an alert. Create a free check on
+[healthchecks.io](https://healthchecks.io) (period 5 minutes, grace 10 minutes), add its
+Telegram or e-mail integration and put the ping URL into `HEALTHCHECK_URL`; the bot pings it
+every 5 minutes and healthchecks.io alerts you when the pings stop.
 
 ### Linux server (systemd)
 
-Put `anker_ups.py`, `install_linux.sh` and `.env` into one folder and run:
+Put `anker_ups.py`, `translations.py`, `install_linux.sh` and `.env` into one folder and run:
 
 ```bash
 sudo bash install_linux.sh
@@ -84,6 +103,19 @@ updates can push the machine into swap until it stops responding. Disabling them
 ```bash
 sudo systemctl disable --now dnf-makecache.timer oracle-cloud-agent oracle-cloud-agent-updater
 ```
+
+### Docker
+
+Every release also publishes an image for amd64 and arm64 (e.g. Raspberry Pi, Oracle ARM):
+
+```bash
+docker run -d --name anker-ups --restart unless-stopped \
+  --env-file .env -v anker-data:/data ghcr.io/ooor1onoo/anker-telegram-watchdog:latest
+docker logs -f anker-ups
+```
+
+The database and the log are kept in the `/data` volume (a bind-mounted folder must be writable
+by uid 1000). Windows power plans do not apply in a container.
 
 ### Windows exe
 
