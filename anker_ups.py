@@ -55,6 +55,7 @@ POWER_SAVER_GUID = "a1841308-3541-4fab-bc81-f71556f20b4a"
 IS_WINDOWS = platform.system() == "Windows"
 REALTIME_TIMEOUT = 300  # seconds the device streams 0405 messages before the poller re-triggers
 HEALTHCHECK_EVERY = 300  # seconds between pings to HEALTHCHECK_URL
+IDLE_LOAD_W = 30  # output below this counts as "no load" for the full-battery outage confirm
 
 log = logging.getLogger("anker_ups")
 
@@ -347,21 +348,22 @@ class Telegram:
         log.info("ALERT: %s", render(lang("en")))
         if self.enabled:
             stamp = time.strftime("%H:%M:%S")
-            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", None, None, None))
+            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", None, None, None, False))
 
     def reply(self, chat: str, text: str | Render, markup: str | Render | None = None,
-              code: str | None = None) -> None:
-        """Message to one chat; code forces the language (people who are not users yet)."""
+              code: str | None = None, title: bool = False) -> None:
+        """Message to one chat; code forces the language (people who are not users yet);
+        title makes the first line bold (menus, status, stats)."""
         if self.enabled:
-            self.queue.put(("text", text, markup, chat, code))
+            self.queue.put(("text", text, markup, chat, code, title))
 
     def send_photo(self, png: Callable[[Lang], bytes | None], caption: Render, chat: str | None = None) -> None:
         if self.enabled:
-            self.queue.put(("photo", png, caption, chat, None))
+            self.queue.put(("photo", png, caption, chat, None, False))
 
     def _worker(self) -> None:
         while True:
-            kind, payload, extra, target, code = self.queue.get()
+            kind, payload, extra, target, code, title = self.queue.get()
             chats = [target] if target else (self.users.recipients() if self.users else [])
             photos: dict[str, bytes | None] = {}  # one chart per language
             for chat in chats:
@@ -375,7 +377,7 @@ class Telegram:
                         args = (photos[L.code], extra(L), self.keyboard(L))
                     else:
                         markup = extra(L) if callable(extra) else extra
-                        args = (payload(L) if callable(payload) else payload, markup or self.keyboard(L))
+                        args = (payload(L) if callable(payload) else payload, markup or self.keyboard(L), title)
                 except Exception:
                     log.exception("Telegram message rendering failed")
                     continue
@@ -387,7 +389,10 @@ class Telegram:
                 if kind == "photo":
                     self._send_photo(chat, *args)
                 else:
-                    self._call("sendMessage", {"chat_id": chat, "text": args[0], "reply_markup": args[1]})
+                    params = {"chat_id": chat, "text": args[0], "reply_markup": args[1]}
+                    if args[2]:
+                        params["entities"] = bold_first_line(args[0])
+                    self._call("sendMessage", params)
                 return
             except urllib.error.HTTPError as exc:
                 if exc.code != 429 and exc.code < 500:
@@ -446,11 +451,12 @@ class Telegram:
             return L.t("chart_sent")
         texts = {"outages": stats.outages_text, "energy": stats.energy_text, "months": stats.months_text}
         if action in texts:
-            self.reply(chat, texts[action])
+            self.reply(chat, texts[action], title=True)
         return L.t("sent")
 
     def _edit(self, msg: dict, view: tuple[str, str | None]) -> None:
-        params = {"chat_id": msg["chat"]["id"], "message_id": msg.get("message_id"), "text": view[0]}
+        params = {"chat_id": msg["chat"]["id"], "message_id": msg.get("message_id"), "text": view[0],
+                  "entities": bold_first_line(view[0])}
         if view[1]:
             params["reply_markup"] = view[1]
         with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
@@ -500,14 +506,14 @@ class Telegram:
             if self.has_light() is False:  # also refreshes the keyboard without the button
                 self.reply(chat, L.t("no_light"))
             else:
-                self.reply(chat, *h.controller.render("light", Ctx(L, users.is_admin(user), chat, user)))
+                self.reply(chat, *h.controller.render("light", Ctx(L, users.is_admin(user), chat, user)), title=True)
         elif action == "settings":
-            self.reply(chat, *h.controller.render("root", Ctx(L, users.is_admin(user), chat, user)))
+            self.reply(chat, *h.controller.render("root", Ctx(L, users.is_admin(user), chat, user)), title=True)
         elif action == "stats":
             if h.stats:
-                self.reply(chat, L.t("stats_title"), stats_menu(L))
+                self.reply(chat, L.t("stats_title"), stats_menu(L), title=True)
         elif action == "status":
-            self.reply(chat, h.status(L))
+            self.reply(chat, h.status(L), title=True)
 
     def _stranger(self, chat: str, name: str, code: str | None) -> None:
         """Someone who is not a user pressed /start (or added the bot to a group)."""
@@ -622,6 +628,13 @@ class Telegram:
             self._edit(msg, h.controller.render(f"user:{target}", ctx))
             return L.t("saved")
         return L.t("unknown")
+
+
+def bold_first_line(text: str) -> str:
+    """Telegram entities that make the first line bold; offsets count UTF-16 code units, and
+    entities need no escaping, unlike parse_mode (names may contain < or &)."""
+    first = text.split("\n", 1)[0]
+    return json.dumps([{"type": "bold", "offset": 0, "length": len(first.encode("utf-16-le")) // 2}])
 
 
 def chart_title(L: Lang, hours: int) -> str:
@@ -1170,12 +1183,16 @@ class Controller:
 
 class Watchdog:
     def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, settings: Settings,
-                 name: str = "Anker", stats: Stats | None = None):
+                 name: str = "Anker", stats: Stats | None = None, full_confirm_s: float = 180):
         self.name = name
         self.stats = stats
         self.tg = tg
         self.power = power
         self.confirm_s = confirm_s
+        # A full station with (almost) no load tops itself up from the grid in short bursts,
+        # so its AC input sits at 0 W for up to a minute at a time while the grid is up; in
+        # that state an outage needs a longer run of 0 W (with a real load the input never drops)
+        self.full_confirm_s = full_confirm_s
         self.settings = settings
         self.on_battery: bool | None = None  # None until the first telemetry
         self.no_grid_since: float | None = None
@@ -1195,7 +1212,8 @@ class Watchdog:
     def outage_seconds(self) -> float | None:
         return time.time() - self.outage_started if self.outage_started else None
 
-    def evaluate(self, grid: bool, ac_in: int, levels: dict[str, int], remaining_h: float | None = None) -> None:
+    def evaluate(self, grid: bool, ac_in: int, levels: dict[str, int], remaining_h: float | None = None,
+                 load: int | None = None) -> None:
         """levels ({"main": %, "expansion": %}) drive the per-battery thresholds and the messages."""
         now = time.monotonic()
         total = round(sum(levels.values()) / len(levels))
@@ -1234,7 +1252,8 @@ class Watchdog:
 
         if self.no_grid_since is None:
             self.no_grid_since = now
-        if not self.on_battery and now - self.no_grid_since >= self.confirm_s:
+        idle_full = min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W
+        if not self.on_battery and now - self.no_grid_since >= (self.full_confirm_s if idle_full else self.confirm_s):
             self.on_battery = True
             resumed = self.stats.open_outage() if self.stats else None
             if resumed:
@@ -1250,8 +1269,12 @@ class Watchdog:
                 # how long the grid was up: since the end of the previous outage
                 last_end = self.stats.last_outage_end() if self.stats else None
                 up = self.outage_started - last_end if last_end and self.outage_started > last_end else None
+                # a full idle station confirms after minutes: then say when the input really dropped
+                started = (time.strftime("%H:%M", time.localtime(self.outage_started))
+                           if time.time() - self.outage_started >= 60 else None)
                 if self.settings.flag("alert_outage"):
                     self.tg.send(lambda L: L.t("al_lost", name=name, charge=L.charge(levels), left=left(L),
+                                               since=L.t("al_since", time=started) if started else "",
                                                uptime=L.t("al_uptime", dur=L.dur(up)) if up else ""))
                 if self.stats:
                     self.stats.outage_started(self.outage_started, total)
@@ -1382,7 +1405,8 @@ async def run(args: argparse.Namespace) -> None:
         "summary": os.environ.get("SUMMARY_TIME", "09:00").strip(),
         "alert_outage": "1", "alert_full": "1", "alert_expansion": "1", "alert_link": "1",
     })
-    watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats)
+    watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
+                        full_confirm_s=args.full_confirm)
     healthcheck = os.environ.get("HEALTHCHECK_URL", "").strip()
 
     if args.test_telegram:
@@ -1408,6 +1432,7 @@ async def run(args: argparse.Namespace) -> None:
 
         last_message, last_change = None, time.monotonic()
         last_levels: dict[str, int] | None = None
+        last_load: int | None = None
         expansion: int | None = None  # pack count, None until the first telemetry
         disconnected_since: float | None = None
         last_restart = last_retrigger = time.monotonic()
@@ -1517,11 +1542,12 @@ async def run(args: argparse.Namespace) -> None:
                     if stats:
                         stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
                                           round(sum(levels.values()) / len(levels)), grid)
-                    watchdog.evaluate(grid, ac_in, levels, remaining_h)
+                    last_load = as_int(data.get("output_power_total"))
+                    watchdog.evaluate(grid, ac_in, levels, remaining_h, last_load)
                     continue
             # keep re-evaluating so the outage confirm timer runs between messages
             if watchdog.no_grid_since is not None and not watchdog.on_battery and last_levels:
-                watchdog.evaluate(False, 0, last_levels)
+                watchdog.evaluate(False, 0, last_levels, load=last_load)
 
 
 def apply_timezone() -> None:
@@ -1541,6 +1567,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--dry-run", action="store_true", help="do not touch the power plan")
     p.add_argument("--confirm", type=float, default=10, help="seconds without AC input before outage (10)")
+    p.add_argument("--full-confirm", type=float, default=180,
+                   help="the same with a full battery and no load, when the input pulses (180)")
     p.add_argument("--thresholds", type=int, nargs="+", default=[75, 50, 25])
     p.add_argument("--link-timeout", type=float, default=120, help="seconds without telemetry before alert")
     p.add_argument("--retrigger", type=float, default=15,
