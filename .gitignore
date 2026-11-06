@@ -10,3 +10,5 @@ run_test.command
 .DS_Store
 *.zip
 anker_ups.db*
+.pytest_cache/
+.ruff_cache/

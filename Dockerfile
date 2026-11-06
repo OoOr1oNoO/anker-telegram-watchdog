@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
     && useradd --uid 1000 --create-home app && mkdir /data && chown app:app /data
 
 WORKDIR /app
-COPY anker_ups.py translations.py ./
+COPY anker_ups.py ./
+COPY ankerups ./ankerups
 
 # .env (optional, variables can come from --env-file instead), database and log live in /data
 ENV DATA_DIR=/data PYTHONUNBUFFERED=1 MPLCONFIGDIR=/tmp/matplotlib

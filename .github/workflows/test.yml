@@ -1,0 +1,23 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Lint
+        run: uvx ruff check --select F,E9 anker_ups.py ankerups tests
+
+      - name: Unit tests
+        run: uv run --python 3.12 --with pytest --with matplotlib pytest -q tests
+
+      - name: Script starts with its dependencies
+        run: uv run --python 3.12 anker_ups.py --help

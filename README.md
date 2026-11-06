@@ -53,7 +53,7 @@ grid is up; keep a load on the station or check the log before relying on it.
    uv run anker_ups.py                # normal run
    ```
 
-Keep `translations.py` next to `anker_ups.py`. Options: `--thresholds 75 50 25`, `--confirm 10`
+Keep the `ankerups` folder next to `anker_ups.py`. Options: `--thresholds 75 50 25`, `--confirm 10`
 (seconds without input before an outage), `--link-timeout 120`, `--test-telegram`. A log is
 written to `anker_ups.log` next to the script.
 
@@ -86,7 +86,7 @@ every 5 minutes and healthchecks.io alerts you when the pings stop.
 
 ### Linux server (systemd)
 
-Put `anker_ups.py`, `translations.py`, `install_linux.sh` and `.env` into one folder and run:
+Put `anker_ups.py`, the `ankerups` folder, `install_linux.sh` and `.env` into one folder and run:
 
 ```bash
 sudo bash install_linux.sh
@@ -145,6 +145,28 @@ schtasks /create /tn AnkerUPS /tr "\"C:\Tools\AnkerUPS\anker_ups.exe\"" /sc onlo
 Run only one instance per bot: two instances duplicate alerts and break the Status button.
 To use both a server and the PC, let the server handle Telegram and leave `TG_BOT_TOKEN` empty
 in the PC's `.env`, so the PC only switches power plans.
+
+## Development
+
+`anker_ups.py` only starts the `ankerups` package:
+
+| Module | What it does |
+|---|---|
+| `app.py` | startup, Anker MQTT loop, daily summary, healthcheck |
+| `watchdog.py` | outage, charge and full-charge alerts; Windows power plans |
+| `bot.py` | Telegram: sending, long polling, buttons, access requests |
+| `menus.py` | settings, light, language and user menus; station commands |
+| `users.py` | users, roles and access mode |
+| `stats.py` | SQLite samples, outages and settings; summaries and charts |
+| `i18n.py`, `translations.py` | languages and number formatting |
+
+Tests use a fake Telegram API and a simulated clock, so they need no account or station:
+
+```bash
+uv run --with pytest --with matplotlib pytest -q tests
+```
+
+They run in GitHub Actions on every push, together with a lint check.
 
 ## Disclaimer
 

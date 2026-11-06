@@ -26,13 +26,13 @@ jobs:
         run: >
           uv run --python 3.12 --with pyinstaller --with ${{ env.ANKER_API }} --with matplotlib
           pyinstaller --onefile --noconsole --name anker_ups
-          --collect-submodules anker_solix_api anker_ups.py
+          --collect-submodules anker_solix_api --collect-submodules ankerups anker_ups.py
 
       - name: Build lite exe (no charts)
         run: >
           uv run --python 3.12 --with pyinstaller --with ${{ env.ANKER_API }}
           pyinstaller --onefile --noconsole --name anker_ups_lite
-          --collect-submodules anker_solix_api
+          --collect-submodules anker_solix_api --collect-submodules ankerups
           --exclude-module matplotlib --exclude-module numpy --exclude-module PIL anker_ups.py
 
       - name: Smoke test
