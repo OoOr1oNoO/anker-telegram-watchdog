@@ -146,7 +146,7 @@ class Watchdog:
             if self.on_battery:
                 if self.settings.flag("alert_outage"):
                     off = self.outage_seconds()
-                    self.tg.send(lambda L: L.t("al_back", dur=L.dur(off) if off else "?", ac_in=ac_in,
+                    self.tg.send(lambda L: L.t("al_back", dur=L.dur(off) if off else "?",
                                                charge=L.charge(levels)))
                 if self.stats:
                     self.stats.outage_ended(time.time(), total)

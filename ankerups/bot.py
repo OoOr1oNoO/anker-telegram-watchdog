@@ -30,13 +30,15 @@ class BotHandlers:
     stats: "Stats | None" = None
 
 
-KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_stats", "stats"),
-                    ("btn_settings", "settings"))
+KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_12v", "light"),
+                    ("btn_stats", "stats"), ("btn_settings", "settings"))
 
 
 # button texts in every language -> action; in groups the bot sees every message (privacy mode
 # off), so only exact button texts and commands are handled, not any text with "status" in it
 BUTTON_ACTIONS = {lang(code).t(key).lower(): action for code in LANGS for key, action in KEYBOARD_ACTIONS}
+# labels of keyboards sent before v1.4.0 ("🔦 Light" became "🔦 Light/12V")
+BUTTON_ACTIONS |= {lang(code).t("btn_light").lower().removesuffix("/12v"): "light" for code in LANGS}
 
 
 COMMANDS = {"start": "status", "status": "status", "light": "light", "stats": "stats", "settings": "settings"}
@@ -45,12 +47,12 @@ COMMANDS = {"start": "status", "status": "status", "light": "light", "stats": "s
 REMOVE_KEYBOARD = json.dumps({"remove_keyboard": True})
 
 
-def main_keyboard(L: Lang, light: bool = True) -> str:
+def main_keyboard(L: Lang, panel: str | None = "btn_light") -> str:
     """Persistent reply keyboard; Status gets its own row (Telegram makes a row's buttons equal).
-    Light is left out once the station is known to have none (no light_mode field)."""
+    panel is the label key of the light / 12V button, None when the station has neither."""
     row = [{"text": L.t("btn_stats")}, {"text": L.t("btn_settings")}]
     return json.dumps({"keyboard": [[{"text": L.t("btn_status")}],
-                                    [{"text": L.t("btn_light")}, *row] if light else row],
+                                    [{"text": L.t(panel)}, *row] if panel else row],
                        "resize_keyboard": True, "is_persistent": True})
 
 
@@ -80,7 +82,7 @@ class Telegram:
         # (kind, payload, markup, chat, lang code); chat None = all active chats; payload and
         # markup are strings or functions of the language, rendered per chat in the worker
         self.queue: queue.Queue[tuple] = queue.Queue()
-        self.has_light: Callable[[], bool | None] = lambda: None  # set by listen_commands
+        self.panel_button: Callable[[], str | None] = lambda: "btn_light"  # set by listen_commands
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         elif not token:
@@ -112,7 +114,7 @@ class Telegram:
         return self.users.lang(chat) if self.users else self.default
 
     def keyboard(self, L: Lang) -> str:
-        return main_keyboard(L, self.has_light() is not False)
+        return main_keyboard(L, self.panel_button())
 
     def send(self, render: Render) -> None:
         """Alert to all active chats, each in its language."""
@@ -177,7 +179,7 @@ class Telegram:
             time.sleep(15)
 
     def listen_commands(self, handlers: BotHandlers) -> None:
-        self.has_light = handlers.controller.has_light
+        self.panel_button = handlers.controller.panel_button
         if self.enabled:
             threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
 
@@ -274,7 +276,7 @@ class Telegram:
                 self._add_by_id(chat, text.strip(), L)
             return
         if action == "light":
-            if self.has_light() is False:  # also refreshes the keyboard without the button
+            if self.panel_button() is None:  # also refreshes the keyboard without the button
                 self.reply(chat, L.t("no_light"))
             else:
                 self.reply(chat, *h.controller.render("light", Ctx(L, users.is_admin(user), chat, user)), title=True)

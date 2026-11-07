@@ -8,7 +8,8 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - Charge alerts for the main battery and each expansion battery (default 75 / 50 / 25 %)
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
 - **📊 Status** button in the bot: grid state, charge, remaining time, input and load
-- **🔦 Light** button: switch the station light (off / low / medium / high / blink)
+- **🔦 Light/12V** button: switch the station light (off / low / medium / high / blink) and the
+  DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
   outages and energy by month, energy through the station (kWh in / out) and a daily summary
   with a chart (data is kept in `anker_ups.db` next to the script)
@@ -54,7 +55,7 @@ grid is up; keep a load on the station or check the log before relying on it.
    ```
 
 Keep the `ankerups` folder next to `anker_ups.py`. Options: `--thresholds 75 50 25`, `--confirm 10`
-(seconds without input before an outage), `--link-timeout 120`, `--test-telegram`. A log is
+(seconds without input before an outage), `--link-timeout 120`, `--test-telegram`, `--autostart` (Windows). A log is
 written to `anker_ups.log` next to the script.
 
 ### Users, groups and access
@@ -127,18 +128,25 @@ this repository by GitHub Actions ([workflow](.github/workflows/release.yml)), s
   while the bot runs on a server
 - `env.example`: save it next to the exe as `.env` and fill it in
 
-The exe has no window; it writes `anker_ups.log` next to itself. Stop it with
+The exe has no window; it writes `anker_ups.log` next to itself, and a startup error (e.g. no
+Anker login in `.env`) is also shown in a message box. `.env.txt` (Notepad with hidden file
+extensions) works too. Stop it with
 `taskkill /im anker_ups.exe /f`. The files are not code-signed, so Windows SmartScreen or Defender
 may warn about them (a known false positive for PyInstaller builds). If you prefer not to
 allow an unsigned exe, run the script with `uv` instead.
 
 To build it yourself, run `build_exe.bat` (lite variant) on Windows.
 
-Autostart at logon:
+Autostart at logon: put the exe and `.env` into their final folder and run the exe once with
+`--autostart` (no admin rights needed; it adds the exe to `HKCU\...\CurrentVersion\Run` and
+shows a message box). `--autostart off` removes it.
 
 ```bat
-schtasks /create /tn AnkerUPS /tr "\"C:\Tools\AnkerUPS\anker_ups.exe\"" /sc onlogon /rl limited
+C:\Tools\AnkerUPS\anker_ups_lite.exe --autostart
 ```
+
+Downloaded exe files carry a "from the internet" mark, so SmartScreen asks once on the first
+start; to avoid it, tick **Unblock** in the file properties (or run `Unblock-File` in PowerShell).
 
 ### One bot, one instance
 

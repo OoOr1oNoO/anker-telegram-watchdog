@@ -1,6 +1,7 @@
 """Bot flows: languages, access modes, roles, groups and message formatting."""
 
 import json
+from types import SimpleNamespace
 
 from conftest import FakeBot, buttons, texts, toast
 
@@ -90,8 +91,30 @@ def test_alerts_reach_every_chat_in_its_language(bot: FakeBot):
     assert sent == {bot.ADMIN: "📶 Дані від Anker знову надходять", bot.GROUP: "📶 Anker data is flowing again"}
 
 
-def test_light_button_hidden_without_light(bot: FakeBot):
+def test_light_button_hidden_without_light_and_dc(bot: FakeBot):
     del bot.station["light_mode"]
-    calls = bot.message(bot.ADMIN, "🔦 Light")
-    assert texts(calls) == ["This station has no light"]
-    assert ["🔦 Light"] not in [row[:1] for row in buttons(calls[0][1])]
+    calls = bot.message(bot.ADMIN, "🔦 Light/12V")
+    assert texts(calls) == ["This station has no light and no 12V output"]
+    assert ["🔦 Light/12V"] not in [row[:1] for row in buttons(calls[0][1])]
+
+
+def test_light_panel_has_dc_switch(bot: FakeBot):
+    bot.station["dc_output_power_switch"] = 0
+    calls = bot.message(bot.ADMIN, "🔦 Light")  # the label of keyboards from older versions
+    assert texts(calls)[0].splitlines() == ["🔦 Light: Off", "🔌 12V: Off"]
+    assert buttons(calls[0][1])[-1] == ["🔌 12V On", "• 🔌 12V Off"]
+
+
+def test_light_panel_dc_only_and_stays_open(bot: FakeBot):
+    del bot.station["light_mode"]
+    bot.station["dc_output_power_switch"] = 0
+    calls = bot.message(bot.ADMIN, "🔦 Light/12V")
+    assert texts(calls)[0] == "🔌 12V: Off"
+    calls = bot.message(bot.ADMIN, "/start")
+    assert buttons(calls[0][1])[1][0] == "🔌 12V"  # the keyboard button without the light
+    sent = []
+    bot.controller.device = SimpleNamespace(set_dc_output=lambda **kw: sent.append(kw))
+    calls = bot.press(bot.ADMIN, "a:dc:1@light")
+    assert sent == [{"enabled": True}]
+    assert toast(calls) == "On ✓"
+    assert texts(calls)[-1] == "🔌 12V: On"  # the panel is shown again, not Outputs

@@ -40,16 +40,22 @@ def data_dir() -> Path:
     return path
 
 
-def load_env() -> None:
-    env_file = data_dir() / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8").splitlines():
+def load_env() -> Path | None:
+    """Load .env into os.environ (existing variables win); returns the file used, None if none.
+
+    Windows Notepad often saves it as ".env.txt" (with extensions hidden) and may add a BOM,
+    so both are accepted.
+    """
+    env_file = next((f for f in (data_dir() / ".env", data_dir() / ".env.txt") if f.is_file()), None)
+    if env_file is None:
+        return None
+    for line in env_file.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return env_file
 
 
 def id_list(value: str | None) -> list[str]:

@@ -2,7 +2,7 @@
 
 - Telegram alert when AC input is lost / restored, with durations, and a full-charge alert.
 - Charge alerts per battery (default 75 / 50 / 25 %) and a critical charge alert.
-- Bot buttons: Status, Light, Stats (charts, outages, energy, months), Settings
+- Bot buttons: Status, Light / 12V, Stats (charts, outages, energy, months), Settings
   (notifications, station controls, users and access, language).
 - Messages in English, Ukrainian, Russian, Polish, German or Spanish, per chat.
 - Daily summary; samples, outages, users and settings are kept in SQLite.
@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 
 from aiohttp import ClientSession
 from anker_solix_api.api import AnkerSolixApi
@@ -33,6 +34,7 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 from .bot import BotHandlers, Telegram
 from .common import (
     HEALTHCHECK_EVERY,
+    IS_WINDOWS,
     REALTIME_TIMEOUT,
     as_int,
     data_dir,
@@ -138,7 +140,7 @@ async def run(args: argparse.Namespace) -> None:
 
     user, password = os.environ.get("ANKERUSER"), os.environ.get("ANKERPASSWORD")
     if not (user and password):
-        raise SystemExit("ANKERUSER/ANKERPASSWORD not set")
+        raise SystemExit("ANKERUSER / ANKERPASSWORD are not set: put them into .env next to the program")
 
     async with ClientSession() as websession:
         api = AnkerSolixApi(user, password, os.environ.get("ANKERCOUNTRY", "DE"), websession,
@@ -283,8 +285,52 @@ def apply_timezone() -> None:
         time.tzset()
 
 
+def tell(text: str, error: bool = False) -> None:
+    """Show a message to whoever started the program: a message box for the windowless exe."""
+    if IS_WINDOWS and not sys.stderr:
+        import ctypes  # noqa: PLC0415 - Windows only
+
+        icon = 0x10 if error else 0x40  # MB_ICONERROR / MB_ICONINFORMATION
+        ctypes.windll.user32.MessageBoxW(None, text, "Anker UPS watchdog", icon | 0x40000)  # MB_TOPMOST
+    else:
+        print(text, file=sys.stderr if error else sys.stdout)
+
+
+def fatal(text: str) -> None:
+    """Log a startup error and show it; a windowless exe would otherwise just disappear."""
+    log.error("Stopped: %s", text)
+    tell(f"{text}\n\nLog: {data_dir() / 'anker_ups.log'}", error=True)
+
+
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "AnkerUPS"
+
+
+def set_autostart(on: bool) -> str:
+    """Start the exe at Windows logon (current user, no admin rights): HKCU ... Run registry value."""
+    if not IS_WINDOWS:
+        raise SystemExit("--autostart is for Windows; on Linux use install_linux.sh (systemd)")
+    import winreg  # noqa: PLC0415 - Windows only
+
+    if getattr(sys, "frozen", False):
+        command = f'"{sys.executable}"'
+    else:  # the script: a windowless pythonw next to python, if there is one
+        exe = Path(sys.executable)
+        pythonw = exe.with_name("pythonw.exe")
+        command = f'"{pythonw if pythonw.exists() else exe}" "{Path(sys.argv[0]).resolve()}"'
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        if on:
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, command)
+            return f"Autostart at logon is on:\n{command}\n\nTurn it off with --autostart off."
+        try:
+            winreg.DeleteValue(key, AUTOSTART_NAME)
+        except FileNotFoundError:
+            pass
+        return "Autostart at logon is off."
+
+
 def main() -> None:
-    load_env()
+    env_file = load_env()
     apply_timezone()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--dry-run", action="store_true", help="do not touch the power plan")
@@ -296,6 +342,8 @@ def main() -> None:
     p.add_argument("--retrigger", type=float, default=15,
                    help="seconds without telemetry before re-requesting realtime data (15)")
     p.add_argument("--test-telegram", action="store_true", help="send a test message and exit")
+    p.add_argument("--autostart", choices=["on", "off"], nargs="?", const="on",
+                   help="Windows: start this exe at logon (on, the default) or stop doing it (off), then exit")
     p.add_argument("-v", "--verbose", action="store_true", help="print every telemetry update")
     args = p.parse_args()
     # a windowless exe has no stderr, so always keep a rotating log next to it
@@ -307,10 +355,32 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
     for noisy in ("anker_solix_api", "paho", "aiohttp"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    if args.autostart:
+        try:
+            text = set_autostart(args.autostart == "on")
+        except SystemExit as exc:
+            fatal(str(exc.code))
+            raise SystemExit(1) from None
+        except OSError as exc:
+            fatal(f"Cannot change autostart: {exc}")
+            raise SystemExit(1) from None
+        log.info(text.replace("\n", " "))
+        tell(text)
+        return
+    log.info("Settings: %s", env_file or f"no .env in {data_dir()}, using environment variables")
     try:
         asyncio.run(run(args))
     except KeyboardInterrupt:
         pass
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            fatal(exc.code)
+            raise SystemExit(1) from None
+        raise
+    except Exception as exc:
+        log.exception("Unexpected error")
+        fatal(f"{type(exc).__name__}: {exc}")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -102,25 +102,28 @@ class Controller:
         state = self._state(key)
         return STATION_CONTROLS[key][2](L, state) if state in STATION_CONTROLS[key][1] else "?"
 
-    def has_light(self) -> bool | None:
-        """None until the first battery telemetry, then whether the station reports a light."""
+    def panel_button(self) -> str | None:
+        """Label key of the light / DC 12V panel button: "btn_light" with a light (also before the
+        first telemetry), "btn_12v" with only the DC 12V output, None when the station has neither."""
         data = self.data()
         if "light_mode" in data:
             self.light_seen = True
         if self.light_seen:
-            return True
-        return False if ("main_battery_soc" in data or "battery_soc" in data) else None
+            return "btn_light"
+        if "dc_output_power_switch" in data:
+            return "btn_12v"
+        return None if ("main_battery_soc" in data or "battery_soc" in data) else "btn_light"
 
     def _supported(self, key: str) -> bool:
         return STATION_CONTROLS[key][0] in self.data()
 
-    def _row(self, key: str, L: Lang, prefix: str = "") -> list[dict]:
+    def _row(self, key: str, L: Lang, prefix: str = "", back: str = "") -> list[dict]:
         current = self._state(key)
         _, values, label, _ = STATION_CONTROLS[key]
         label = BUTTON_LABELS.get(key, label)
         # rows of 4-5 buttons have ~6 characters each on a phone: no space after the marker
         mark = "•" if len(values) >= 4 else "• "
-        return [{"text": (mark if v == current else "") + prefix + label(L, v), "callback_data": f"a:{key}:{v}"}
+        return [{"text": (mark if v == current else "") + prefix + label(L, v), "callback_data": f"a:{key}:{v}{back}"}
                 for v in values]
 
     @staticmethod
@@ -132,8 +135,16 @@ class Controller:
     def render(self, menu: str, ctx: Ctx) -> tuple[str, str]:
         L, st = ctx.L, self.settings
         if menu == "light":
-            row = self._row("light", L)
-            return L.t("light_title", v=self._label("light", L)), self._markup(L, [row[:3], row[3:]], back=None)
+            # the light and the DC 12V socket (e.g. a USB lamp in a 12V adapter) in one panel
+            lines, rows = [], []
+            if self._supported("light"):
+                row = self._row("light", L)
+                lines.append(L.t("light_title", v=self._label("light", L)))
+                rows += [row[:3], row[3:]]
+            if self._supported("dc"):
+                lines.append(f"🔌 12V: {self._label('dc', L)}")
+                rows.append(self._row("dc", L, "🔌 12V ", back="@light"))
+            return "\n".join(lines or [L.t("no_light")]), self._markup(L, rows, back=None)
         if menu == "notif":
             th = st.thresholds
             on_off = {True: L.t("on"), False: L.t("off")}
@@ -263,6 +274,7 @@ class Controller:
             return L.t("saved"), "notif"
         if key not in STATION_CONTROLS:
             return L.t("unknown"), "root"
+        value, _, back = value.partition("@")  # "@light": pressed in the Light / 12V panel
         confirmed = value.endswith("!")
         value = value.rstrip("!")
         field, values, label, setter = STATION_CONTROLS[key]
@@ -278,6 +290,6 @@ class Controller:
         log.info("Command %s=%s by %s: %s", key, value, ctx.user, "ok" if ok else "failed")
         if ok:
             self.pending[field] = (value, time.time())
-        menu = {"light": "light", "ac": "outputs", "acmode": "outputs", "dc": "outputs",
+        menu = back or {"light": "light", "ac": "outputs", "acmode": "outputs", "dc": "outputs",
                 "dcmode": "outputs"}.get(key, "charging")
         return (f"{label(L, value)} ✓" if ok else L.t("cmd_failed")), menu

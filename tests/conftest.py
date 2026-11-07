@@ -44,7 +44,7 @@ class FakeBot:
         self.tg.users = self.users
         self.station = station
         self.controller = Controller(settings, self.users, lambda: self.station, lambda coro: True, None)
-        self.tg.has_light = self.controller.has_light
+        self.tg.panel_button = self.controller.panel_button
         self.handlers = BotHandlers(lambda L: f"📊 Station\n{L.code}", self.controller, stats)
 
     def _call(self, method, params, timeout=10):
