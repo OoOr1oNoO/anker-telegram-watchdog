@@ -39,6 +39,13 @@ class Users:
             elif self.role(chat) not in ACTIVE_ROLES:
                 self.upsert(chat, role="user")
 
+    def text_status(self, chat: str) -> bool:
+        """The chat wants 📊 Status as text instead of the widget (older Telegram apps)."""
+        return self.stats.meta(f"status_text:{chat}") == "1"
+
+    def set_text_status(self, chat: str, on: bool) -> None:
+        self.stats.meta(f"status_text:{chat}", "1" if on else "0")
+
     def _row(self, chat: str) -> tuple | None:
         rows = self.stats._exec("SELECT name, role, lang, lang_auto FROM users WHERE id = ?", (chat,))
         return rows[0] if rows else None

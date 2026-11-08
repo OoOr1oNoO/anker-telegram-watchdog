@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .common import log
 from .i18n import Lang, Render, lang
@@ -19,6 +20,13 @@ from .menus import Controller, Ctx
 from .stats import Stats, chart_title
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
+from .widget import widget_html
+
+if TYPE_CHECKING:
+    from .schedmenu import ScheduleMenu
+
+WIDGET_UPDATE_EVERY = 15  # seconds between widget data edits
+WIDGET_LIVE_FOR = 48 * 3600  # a status widget stops updating after this long
 
 
 @dataclass
@@ -28,6 +36,8 @@ class BotHandlers:
     status: Render
     controller: "Controller"
     stats: "Stats | None" = None
+    widget: "Callable[[], tuple[str, str] | None] | None" = None  # (station name, widget data JSON)
+    sched: "ScheduleMenu | None" = None
 
 
 KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_12v", "light"),
@@ -45,6 +55,7 @@ COMMANDS = {"start": "status", "status": "status", "light": "light", "stats": "s
 
 
 REMOVE_KEYBOARD = json.dumps({"remove_keyboard": True})
+FORCE_REPLY = json.dumps({"force_reply": True, "selective": True})
 
 
 def main_keyboard(L: Lang, panel: str | None = "btn_light") -> str:
@@ -83,6 +94,8 @@ class Telegram:
         # markup are strings or functions of the language, rendered per chat in the worker
         self.queue: queue.Queue[tuple] = queue.Queue()
         self.panel_button: Callable[[], str | None] = lambda: "btn_light"  # set by listen_commands
+        self.awaiting: dict[tuple[str, str], tuple[str, float]] = {}  # (chat, user) -> (input, time)
+        self.widget_lock = threading.Lock()
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         elif not token:
@@ -136,25 +149,35 @@ class Telegram:
 
     def _worker(self) -> None:
         while True:
-            kind, payload, extra, target, code, title = self.queue.get()
-            chats = [target] if target else (self.users.recipients() if self.users else [])
-            photos: dict[str, bytes | None] = {}  # one chart per language
-            for chat in chats:
-                L = lang(code) if code else self.lang_of(chat)
+            self._process(*self.queue.get())
+
+    def _process(self, kind: str, payload, extra, target: str | None, code: str | None, title: bool) -> None:
+        """Render one queued message for each chat in its language and send it."""
+        chats = [target] if target else (self.users.recipients() if self.users else [])
+        photos: dict[str, bytes | None] = {}  # one chart per language
+        for chat in chats:
+            L = lang(code) if code else self.lang_of(chat)
+            if kind == "widget":
                 try:
-                    if kind == "photo":
-                        if L.code not in photos:
-                            photos[L.code] = payload(L)
-                        if photos[L.code] is None:
-                            continue
-                        args = (photos[L.code], extra(L), self.keyboard(L))
-                    else:
-                        markup = extra(L) if callable(extra) else extra
-                        args = (payload(L) if callable(payload) else payload, markup or self.keyboard(L), title)
+                    name, data = payload()
+                    self._deliver_widget(chat, widget_html(L, name), data, L, extra)
                 except Exception:
-                    log.exception("Telegram message rendering failed")
-                    continue
-                self._deliver(kind, chat, args)
+                    log.exception("Status widget failed")
+                continue
+            try:
+                if kind == "photo":
+                    if L.code not in photos:
+                        photos[L.code] = payload(L)
+                    if photos[L.code] is None:
+                        continue
+                    args = (photos[L.code], extra(L), self.keyboard(L))
+                else:
+                    markup = extra(L) if callable(extra) else extra
+                    args = (payload(L) if callable(payload) else payload, markup or self.keyboard(L), title)
+            except Exception:
+                log.exception("Telegram message rendering failed")
+                continue
+            self._deliver(kind, chat, args)
 
     def _deliver(self, kind: str, chat: str, args: tuple) -> None:
         while True:
@@ -178,10 +201,78 @@ class Telegram:
                 log.warning("Telegram send failed (%s), retrying in 15s", exc)
             time.sleep(15)
 
+    def send_widget(self, chat: str, data: Callable[[], tuple[str, str]], fallback: Render) -> None:
+        """📊 Status as a live widget; fallback is the text status if the widget is refused."""
+        if self.enabled:
+            self.queue.put(("widget", data, fallback, chat, None, False))
+
+    def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render) -> None:
+        params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L)}
+        try:
+            message = self._call("sendWidget", params, timeout=20)["result"]
+        except urllib.error.HTTPError as exc:
+            log.warning("sendWidget to %s failed: %s %s, sending text", chat, exc.code,
+                        exc.read().decode(errors="replace")[:200])
+            self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
+            return
+        with self.widget_lock:
+            widgets = self._widgets()
+            widgets[chat] = [message["message_id"], int(time.time())]  # the older one stops updating
+            self._save_widgets(widgets)
+
+    def _widgets(self) -> dict[str, list[int]]:
+        """Live status widgets: chat -> [message id, sent at]; kept in the DB across restarts."""
+        try:
+            return json.loads(self.users.stats.meta("widgets") or "{}") if self.users else {}
+        except ValueError:
+            return {}
+
+    def _save_widgets(self, widgets: dict) -> None:
+        if self.users:
+            self.users.stats.meta("widgets", json.dumps(widgets))
+
+    def update_widgets(self, data: str) -> None:
+        """Push new data to every live status widget."""
+        with self.widget_lock:
+            widgets = self._widgets()
+        gone = []
+        for chat, (message_id, sent) in widgets.items():
+            if time.time() - sent > WIDGET_LIVE_FOR:
+                gone.append((chat, message_id))
+                continue
+            try:
+                self._call("editMessageWidgetData", {"chat_id": chat, "message_id": message_id, "chat_data": data})
+            except urllib.error.HTTPError as exc:
+                text = exc.read().decode(errors="replace")
+                if "not modified" not in text:
+                    log.info("Status widget in %s no longer updated: %s %s", chat, exc.code, text[:120])
+                    gone.append((chat, message_id))
+            except Exception as exc:  # network: try again next time
+                log.debug("Widget update failed: %s", exc)
+        if gone:
+            with self.widget_lock:
+                widgets = self._widgets()
+                for chat, message_id in gone:  # unless a newer widget was sent meanwhile
+                    if widgets.get(chat, [None])[0] == message_id:
+                        widgets.pop(chat)
+                self._save_widgets(widgets)
+
+    def _widget_loop(self, handlers: BotHandlers) -> None:
+        while True:
+            time.sleep(WIDGET_UPDATE_EVERY)
+            try:
+                info = handlers.widget() if handlers.widget else None
+                if info and self._widgets():
+                    self.update_widgets(info[1])
+            except Exception:
+                log.exception("Widget update loop failed")
+
     def listen_commands(self, handlers: BotHandlers) -> None:
         self.panel_button = handlers.controller.panel_button
         if self.enabled:
             threading.Thread(target=self._poll_commands, args=(handlers,), daemon=True).start()
+            if handlers.widget:
+                threading.Thread(target=self._widget_loop, args=(handlers,), daemon=True).start()
 
     def _set_commands(self) -> None:
         for code in LANGS:
@@ -271,6 +362,15 @@ class Telegram:
         users.note(chat, chat_name(chat_obj, sender), sender.get("language_code"),
                    chat_obj.get("type") == "private")
         L = users.lang(chat)
+        if not action and (chat, user) in self.awaiting and h.sched:
+            kind, asked = self.awaiting.pop((chat, user))
+            if time.time() - asked < 600 and users.is_admin(user):
+                (text_out, markup), again = h.sched.text_input(kind, text, L)
+                if again:  # the answer is the next question ("no such street", "house number?")
+                    self.awaiting[(chat, user)] = (again, time.time())
+                    markup = FORCE_REPLY
+                self.reply(chat, text_out, markup, title=text_out.startswith("📅"))
+            return
         if not action and (chat, user) in users.awaiting_id:
             if time.time() - users.awaiting_id.pop((chat, user)) < 600 and users.is_admin(user):
                 self._add_by_id(chat, text.strip(), L)
@@ -286,7 +386,15 @@ class Telegram:
             if h.stats:
                 self.reply(chat, L.t("stats_title"), stats_menu(L), title=True)
         elif action == "status":
-            self.reply(chat, h.status(L), title=True)
+            if h.widget and h.widget() and not users.text_status(chat):
+                self.send_widget(chat, h.widget, h.status)
+            else:
+                self.reply(chat, h.status(L), title=True)
+
+    def _ask(self, chat: str, user: str, kind: str, h: BotHandlers) -> None:
+        """Ask an admin for typed input (street, house) with a force-reply message."""
+        self.awaiting[(chat, user)] = (kind, time.time())
+        self.reply(chat, lambda L: h.sched.prompt(kind, L), FORCE_REPLY)
 
     def _stranger(self, chat: str, name: str, code: str | None) -> None:
         """Someone who is not a user pressed /start (or added the bot to a group)."""
@@ -339,7 +447,7 @@ class Telegram:
         toast = ""
         if users.role(chat) in ACTIVE_ROLES:
             ctx = Ctx(users.lang(chat), users.is_admin(user), chat, user)
-            if kind in ("a", "u") and not ctx.admin:
+            if kind in ("a", "u", "g") and not ctx.admin:
                 toast = ctx.L.t("only_admins")
                 log.info("Denied %s:%s from user %s", kind, rest, user)
             elif kind == "stats" and h.stats:
@@ -357,6 +465,16 @@ class Telegram:
                 self._edit(msg, h.controller.render(menu, ctx))
             elif kind == "u":
                 toast = self._user_action(rest, ctx, msg, h)
+            elif kind == "g" and h.sched:
+                toast, view, ask = h.sched.callback(rest, ctx.L)
+                if view:
+                    self._edit(msg, view)
+                if ask:
+                    self._ask(chat, user, ask, h)
+            elif kind == "v" and h.widget:  # 📊 Status: widget / text, per chat
+                users.set_text_status(chat, not users.text_status(chat))
+                self._edit(msg, h.controller.render("root", ctx))
+                toast = ctx.L.t("saved")
         with contextlib.suppress(Exception):
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})
 

@@ -74,6 +74,16 @@ class Stats:
     def outage_ended(self, end: float, soc: int) -> None:
         self._exec("UPDATE outages SET end = ?, soc_end = ? WHERE end IS NULL", (int(end), soc))
 
+    def grid_slots(self, midnight: float, now: float) -> str:
+        """Half hours from midnight to now: "1" grid all the time, "0" an outage in it, "-" no data."""
+        rows = self._exec("SELECT ts, grid FROM samples WHERE ts >= ? AND ts < ?", (int(midnight), int(now)))
+        slots = ["-"] * min(48, int((now - midnight) // 1800) + 1)
+        for ts, grid in rows:
+            i = int((ts - midnight) // 1800)
+            if 0 <= i < len(slots):
+                slots[i] = "0" if not grid or slots[i] == "0" else "1"
+        return "".join(slots)
+
     def energy_kwh(self, since: float, until: float | None = None) -> tuple[float, float]:
         rows = self._exec("SELECT COALESCE(SUM(ac_in), 0), COALESCE(SUM(out), 0) FROM samples "
                           "WHERE ts >= ? AND ts < ?", (int(since), int(until or time.time() + 60)))

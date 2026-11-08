@@ -37,6 +37,7 @@ class FakeBot:
         self.tg = Telegram(None, True, lang("en"))  # no token: no worker thread, we drain the queue
         self.tg.enabled = True
         self.calls: list[tuple[str, dict]] = []
+        self.sent_id = 100
         self.tg._call = self._call
         self.tg._send_photo = lambda chat, png, caption, markup: self.calls.append(
             ("sendPhoto", {"chat_id": chat, "caption": caption}))
@@ -49,6 +50,9 @@ class FakeBot:
 
     def _call(self, method, params, timeout=10):
         self.calls.append((method, params))
+        if method in ("sendWidget", "sendMessage"):
+            self.sent_id += 1
+            return {"result": {"message_id": self.sent_id}}
         if method == "getChat":
             return {"result": {"id": int(params["chat_id"]), "first_name": "Petro"}}
         return {"result": {}}
@@ -57,18 +61,7 @@ class FakeBot:
         """Deliver queued messages like the worker does; returns and clears the recorded calls."""
         q = self.tg.queue.queue
         while q:
-            kind, payload, extra, target, code, title = q.popleft()
-            chats = [target] if target else self.users.recipients()
-            for chat in chats:
-                L = lang(code) if code else self.tg.lang_of(chat)
-                if kind == "photo":
-                    png = payload(L)
-                    if png is not None:
-                        self.tg._deliver(kind, chat, (png, extra(L), self.tg.keyboard(L)))
-                    continue
-                markup = extra(L) if callable(extra) else extra
-                text = payload(L) if callable(payload) else payload
-                self.tg._deliver(kind, chat, (text, markup or self.tg.keyboard(L), title))
+            self.tg._process(*q.popleft())
         calls, self.calls = self.calls, []
         return calls
 

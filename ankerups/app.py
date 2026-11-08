@@ -2,6 +2,7 @@
 
 - Telegram alert when AC input is lost / restored, with durations, and a full-charge alert.
 - Charge alerts per battery (default 75 / 50 / 25 %) and a critical charge alert.
+- Planned outage schedule (Kyiv, Kyiv region) with alerts; the status as a live Telegram widget.
 - Bot buttons: Status, Light / 12V, Stats (charts, outages, energy, months), Settings
   (notifications, station controls, users and access, language).
 - Messages in English, Ukrainian, Russian, Polish, German or Spanish, per chat.
@@ -23,7 +24,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiohttp import ClientSession
@@ -46,7 +48,10 @@ from .i18n import Lang, lang
 from .menus import Controller
 from .stats import Settings, Stats, chart_title
 from .users import Users
+from .schedmenu import ScheduleMenu
+from .schedule import Day, Schedule, run_schedule, windows_text
 from .watchdog import PowerPlan, Watchdog, battery_state
+from .widget import widget_data
 
 
 async def find_device(api: AnkerSolixApi, wanted_sn: str | None) -> dict:
@@ -100,6 +105,37 @@ def send_daily_summary(tg: Telegram, stats: Stats | None, at: str) -> None:
     tg.send_photo(chart, lambda L: "📈 " + chart_title(L, 24))
 
 
+def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
+                   levels: Callable[[], dict[str, int] | None]) -> None:
+    """Outage schedule thread: downloads it and sends the schedule alerts."""
+    def on_event(kind: str, day: Day) -> None:
+        flag = "alert_sched_tomorrow" if kind == "tomorrow" else "alert_sched_change"
+        if not settings.flag(flag):
+            return
+        group = schedule.group
+
+        def text(L: Lang) -> str:
+            v = L.t("sc_outages", v=windows_text(day.slots)) if "0" in day.slots else L.t("sc_no_off")
+            if kind == "tomorrow":
+                return L.t("al_sched_tomorrow", group=group, v=v)
+            today = day.date == time.strftime("%Y-%m-%d")
+            return L.t("al_sched_change", day=L.t("w_today" if today else "w_tomorrow").lower(),
+                       group=group, v=v)
+        tg.send(text)
+
+    def on_soon(start: float, end: float) -> None:
+        if not settings.flag("alert_sched_soon"):
+            return
+        lv = levels()
+        mins = max(1, round((start - time.time()) / 60))
+        at = time.strftime("%H:%M", time.localtime(start))
+        until = time.strftime("%H:%M", time.localtime(end)) if end - start < 86400 else "?"
+        tg.send(lambda L: L.t("al_sched_soon", start=at, mins=mins, end=until,
+                              charge=L.charge(lv) if lv else "?"))
+
+    threading.Thread(target=run_schedule, args=(schedule, on_event, on_soon), daemon=True).start()
+
+
 def ping_healthcheck(url: str) -> None:
     """Dead man's switch (e.g. healthchecks.io): the service alerts when the pings stop."""
     def ping() -> None:
@@ -128,7 +164,10 @@ async def run(args: argparse.Namespace) -> None:
         "critical": os.environ.get("CRITICAL_LEVEL") or "10",
         "summary": os.environ.get("SUMMARY_TIME", "09:00").strip(),
         "alert_outage": "1", "alert_full": "1", "alert_expansion": "1", "alert_link": "1",
+        "sched_source": "", "sched_group": "", "sched_label": "",
+        "alert_sched_soon": "1", "alert_sched_tomorrow": "1", "alert_sched_change": "1",
     })
+    schedule = Schedule(settings, stats) if stats else None
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
                         full_confirm_s=args.full_confirm)
     healthcheck = os.environ.get("HEALTHCHECK_URL", "").strip()
@@ -177,7 +216,35 @@ async def run(args: argparse.Namespace) -> None:
                 if snapshot.get("remaining_h"):
                     lines.append(L.t("st_remaining", dur=L.dur(snapshot["remaining_h"] * 3600)))
             lines += [L.t("st_power", ac_in=snapshot["ac_in"], out=snapshot["out"]), L.t("st_age", age=age)]
+            if schedule and schedule.configured and (change := schedule.next_change(time.time())):
+                at = time.strftime("%H:%M", time.localtime(change[0]))
+                lines.append(f"📅 {L.t('w_on_at' if change[1] == '1' else 'w_off_at')} {at}")
             return "\n".join(lines)
+
+        def widget_info() -> tuple[str, str] | None:
+            """Station name and the status widget's data; None until the first telemetry."""
+            if not snapshot or not stats:
+                return None
+            now_wall = time.time()
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            grid = None if watchdog.on_battery is None else not watchdog.on_battery
+            since = watchdog.outage_started if watchdog.on_battery else stats.last_outage_end()
+            fact = stats.grid_slots(today.timestamp(), now_wall)
+            if grid is not None:  # the current half hour: the state right now counts too
+                fact = fact[:-1] + ("0" if not grid or fact[-1:] == "0" else "1")
+            plan_today = plan_tomorrow = group = ""
+            change = None
+            if schedule and schedule.configured:
+                d_today, d_tomorrow = schedule.day(today), schedule.day(today + timedelta(days=1))
+                plan_today = d_today.slots if d_today else ""
+                plan_tomorrow = d_tomorrow.slots if d_tomorrow else ""
+                group, change = schedule.group, schedule.next_change(now_wall)
+            data = widget_data(now_wall, snapshot.get("wall"), grid, since, snapshot["levels"],
+                               snapshot["ac_in"], snapshot["out"],
+                               snapshot.get("remaining_h") if watchdog.on_battery else None,
+                               fact, plan_today, plan_tomorrow, change, group,
+                               datetime.now().hour * 60 + datetime.now().minute)
+            return watchdog.name, data
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
         loop = asyncio.get_running_loop()
@@ -189,7 +256,12 @@ async def run(args: argparse.Namespace) -> None:
         controller = Controller(
             settings, users, lambda: api.mqttsession.mqtt_data.get(sn, {}) if api.mqttsession else {},
             run_on_loop, mqtt_device)
-        tg.listen_commands(BotHandlers(status_text, controller, stats))
+        handlers = BotHandlers(status_text, controller, stats)
+        if schedule:
+            handlers.sched = controller.sched = ScheduleMenu(schedule)
+            handlers.widget, controller.widgets = widget_info, True
+            start_schedule(tg, schedule, settings, lambda: last_levels)
+        tg.listen_commands(handlers)
         while True:
             await asyncio.sleep(1)
             session = api.mqttsession
@@ -238,7 +310,7 @@ async def run(args: argparse.Namespace) -> None:
                 charging = as_int(data.get("charging_status"))
                 remaining_h = data.get("remaining_time_hours")
                 if levels:
-                    snapshot.update(at=now, levels=levels, ac_in=ac_in, remaining_h=remaining_h,
+                    snapshot.update(at=now, wall=time.time(), levels=levels, ac_in=ac_in, remaining_h=remaining_h,
                                     out=as_int(data.get("output_power_total")))
                 log.debug("ac_in=%sW charging_status=%s out=%sW in_total=%sW battery=%s",
                           ac_in, charging, data.get("output_power_total"),

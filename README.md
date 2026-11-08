@@ -7,7 +7,14 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - Full-charge alert once the station has recharged to 100 % after an outage (once per outage)
 - Charge alerts for the main battery and each expansion battery (default 75 / 50 / 25 %)
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
-- **📊 Status** button in the bot: grid state, charge, remaining time, input and load
+- **📊 Status** button in the bot: a live dashboard right in the chat (a Telegram widget the bot
+  keeps updating): grid state and for how long, charge, load, remaining time, today's grid
+  history next to the planned outage schedule, the next planned change and whether the battery
+  lasts until then. Telegram apps without widgets (e.g. older desktop versions) can switch the
+  chat to a text status in **⚙️ Settings**
+- **📅 Outage schedule** (Ukraine): Kyiv by street and house (YASNO), Kyiv region by group
+  ([outage-data-ua](https://github.com/Baskerville42/outage-data-ua)); alerts 30 minutes
+  before a planned outage, when tomorrow's schedule is published and when a schedule changes
 - **🔦 Light/12V** button: switch the station light (off / low / medium / high / blink) and the
   DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
@@ -166,6 +173,8 @@ in the PC's `.env`, so the PC only switches power plans.
 | `menus.py` | settings, light, language and user menus; station commands |
 | `users.py` | users, roles and access mode |
 | `stats.py` | SQLite samples, outages and settings; summaries and charts |
+| `widget.py` | the 📊 Status widget: HTML and its data |
+| `schedule.py`, `schedmenu.py` | planned outage schedules (YASNO, outage-data-ua) and their menu |
 | `i18n.py`, `translations.py` | languages and number formatting |
 
 Tests use a fake Telegram API and a simulated clock, so they need no account or station:

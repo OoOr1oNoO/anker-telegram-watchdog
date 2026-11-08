@@ -89,6 +89,8 @@ class Controller:
         self.run = run  # run(coroutine) -> result, on the asyncio loop
         self.device = device
         self.light_seen = False
+        self.sched = None  # ScheduleMenu, set by the app when Telegram is on
+        self.widgets = False  # 📊 Status can be a widget: show the widget / text switch
         self.pending: dict[str, tuple[str, float]] = {}  # field -> (value, time) until telemetry catches up
 
     def _state(self, key: str) -> str | None:
@@ -205,6 +207,8 @@ class Controller:
                         for code in LANGS]
             return (L.t("lang_title", v=LANG_NAMES[L.code]),
                     self._markup(L, [buttons[:1], buttons[1:4], buttons[4:]]))
+        if menu == "sched" and self.sched:
+            return self.sched.render(L, ctx.admin)
         if menu == "users" and ctx.admin and self.users:
             return self._render_users(L)
         if menu.startswith("user:") and ctx.admin and self.users:
@@ -213,8 +217,13 @@ class Controller:
                  {"text": L.t("s_outputs"), "callback_data": "m:outputs"}],
                 [{"text": L.t("s_charging"), "callback_data": "m:charging"}],
                 [{"text": L.t("s_lang"), "callback_data": "m:lang"}]]
+        if self.sched:
+            rows[1].append({"text": L.t("s_sched"), "callback_data": "m:sched"})
         if ctx.admin and self.users:
             rows[2].append({"text": L.t("s_users"), "callback_data": "m:users"})
+        if self.widgets and self.users:
+            mode = L.t("st_text" if self.users.text_status(ctx.chat) else "st_widget")
+            rows.append([{"text": L.t("st_mode", v=mode), "callback_data": "v:toggle"}])
         return L.t("s_title"), self._markup(L, rows, back=None)
 
     @staticmethod
