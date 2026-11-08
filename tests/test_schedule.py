@@ -171,3 +171,19 @@ def test_run_schedule_warns_once(schedule, fake, monkeypatch):
     warned = []
     sch.run_schedule(schedule, lambda k, d: None, lambda s, e: warned.append((s, e)), Stop())
     assert warned == [(at(9), at(17, 30))]
+
+
+def test_emergency_outages_announced_and_restored(schedule, fake):
+    schedule.set("kyiv", "12.1", "x")
+    schedule.refresh(at(8))
+    saved = fake.schedule["12.1"]["today"]
+    for key in ("today", "tomorrow"):
+        fake.schedule["12.1"][key] = {"slots": [], "date": (DATE if key == "today" else NEXT) + "T00:00:00+02:00",
+                                      "status": "EmergencyShutdowns"}
+    events = schedule.refresh(at(9))
+    assert [(k, d.date) for k, d in events] == [("emergency", DATE)]  # one alert for both days
+    assert schedule.next_change(at(9)) is None and schedule.upcoming_outage(at(8, 40)) is None
+    assert schedule.refresh(at(10)) == []
+    fake.schedule["12.1"]["today"] = saved
+    events = schedule.refresh(at(11))
+    assert [(k, d.date) for k, d in events] == [("restored", DATE)]

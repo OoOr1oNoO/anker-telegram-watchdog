@@ -59,7 +59,8 @@ var bs=b.length>1?b.map(function(x,i){return(i?L.e+(b.length>2?" "+i:""):L.m)+" 
 if(g===0&&d.r)bs=(bs?bs+" · ":"")+"~"+dur(d.r*3600);$("bs").textContent=bs;
 $("o").textContent=d.o==null?"—":d.o+" W";$("os").textContent=L.in+": "+(d.i==null?"—":d.i+" W");
 var cur=Math.floor((d.m+(t-d.t)/60)/30),rows=strip(L.fact,d.f||"",cur);
-if(d.p)rows+=strip(L.today,d.p,cur);if(d.q)rows+=strip(L.tmr,d.q,-1);$("rows").innerHTML=rows;
+if(d.e)rows+="<div class=l><span>"+L.today+"</span><b style='font-size:12px;color:#da3633'>⚠️ "+L.emg+"</b></div>";
+else if(d.p)rows+=strip(L.today,d.p,cur);if(d.q)rows+=strip(L.tmr,d.q,-1);$("rows").innerHTML=rows;
 $("gr").textContent=d.gr?"📅 "+L.grp+" "+d.gr:"📊 "+L.day;
 var nx="";if(d.x&&d.x[0]>t){nx=(d.x[1]=="1"?L.onat:L.offat)+" "+hm(d.x[0])+" · "+dur(d.x[0]-t);
 if(g===0&&d.x[1]=="1"&&d.r&&avg!=null){var left=d.r*3600-(t-d.t),need=d.x[0]-t;
@@ -73,7 +74,7 @@ load();W.onEvent("chatDataChanged",load);setInterval(draw,10000);W.ready()
 def labels(L: Lang) -> dict:
     return {"on": L.t("w_on"), "off": L.t("w_off"), "m": L.t("bat_main"), "e": L.t("bat_expansion"),
             "in": L.t("w_input"), "fact": L.t("w_fact"), "today": L.t("w_today"), "tmr": L.t("w_tomorrow"),
-            "grp": L.t("w_group"), "day": L.t("w_day"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"),
+            "grp": L.t("w_group"), "day": L.t("w_day"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"), "emg": L.t("w_emergency"),
             "u": list(UNITS[L.code][:3])}
 
 
@@ -95,12 +96,13 @@ def _escape(text: str) -> str:
 def widget_data(now: float, telemetry_at: float | None, grid: bool | None, since: float | None,
                 levels: dict[str, int] | None, ac_in: int | None, out: int | None,
                 remaining_h: float | None, fact: str, plan_today: str, plan_tomorrow: str,
-                next_change: tuple[float, str] | None, group: str, minute_of_day: int) -> str:
+                next_change: tuple[float, str] | None, group: str, minute_of_day: int,
+                emergency: bool = False) -> str:
     data = {"t": int(now), "u": int(telemetry_at or now), "g": None if grid is None else int(grid),
             "c": int(since) if since else None, "b": list((levels or {}).values()), "i": ac_in, "o": out,
             "r": round(remaining_h, 2) if remaining_h else None, "f": fact, "p": plan_today,
             "q": plan_tomorrow, "x": [int(next_change[0]), next_change[1]] if next_change else None,
-            "gr": group, "m": minute_of_day}
+            "gr": group, "m": minute_of_day, "e": 1 if emergency else None}
     text = json.dumps({k: v for k, v in data.items() if v not in (None, "")}, separators=(",", ":"))
     assert len(text.encode()) <= MAX_DATA, len(text)
     return text

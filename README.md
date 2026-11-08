@@ -14,7 +14,8 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   chat to a text status in **⚙️ Settings**
 - **📅 Outage schedule** (Ukraine): Kyiv by street and house (YASNO), Kyiv region by group
   ([outage-data-ua](https://github.com/Baskerville42/outage-data-ua)); alerts 30 minutes
-  before a planned outage, when tomorrow's schedule is published and when a schedule changes
+  before a planned outage, when tomorrow's schedule is published, when a schedule changes and
+  when emergency outages replace it (and when it applies again)
 - **🔦 Light/12V** button: switch the station light (off / low / medium / high / blink) and the
   DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,

@@ -89,3 +89,9 @@ def test_schedule_set_up_from_the_bot(wbot: FakeBot, schedule, fake):  # noqa: F
     assert "📍 вул. Хрещатик, 22/к1, group 12.1" in texts(calls)[0]
     assert schedule.group == "12.1"
     assert wbot.message(wbot.ADMIN, "hello") == []  # no more input expected
+
+
+def test_emergency_flag_in_data():
+    data = json.loads(widget.widget_data(1, 1, True, None, {"main": 50}, 0, 0, None, "", "", "", None, "12.1", 0,
+                                         emergency=True))
+    assert data["e"] == 1 and "p" not in data

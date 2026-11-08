@@ -25,6 +25,7 @@ SOURCES = ("kyiv", "oblast")
 FETCH_EVERY = 600  # seconds between schedule downloads
 WARN_BEFORE = 30 * 60  # outage warning this long before a planned outage
 SLOT = 1800
+EMERGENCY = "E"  # a day with emergency outages instead of a schedule, in the "seen" state
 
 # outage-data-ua hour cell -> the two half hours
 OBLAST_CELLS = {"yes": "11", "no": "00", "maybe": "??", "first": "01", "second": "10",
@@ -188,7 +189,8 @@ class Schedule:
 
     def refresh(self, now: float | None = None) -> list[tuple[str, Day]]:
         """Download when due; returns events: ("tomorrow", day) when the next day's schedule is
-        published, ("changed", day) when a published day changes."""
+        published, ("changed", day) when a published day changes, ("emergency", day) when
+        emergency outages replace the schedule and ("restored", day) when it applies again."""
         now = time.time() if now is None else now
         key = f"{self.source}:{self.group}"
         if not self.configured or (now - self.updated < FETCH_EVERY and self.fetched_for == key):
@@ -208,14 +210,22 @@ class Schedule:
         seen = json.loads(self.stats.meta("sched_seen") or "{}") if self.stats else {}
         first = not seen
         today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
-        events = []
+        events: list[tuple[str, Day]] = []
         for day in days:
-            if not day.slots or day.date < today:
+            mark = EMERGENCY if day.status == "emergency" else day.slots  # "" = not published
+            if not mark or day.date < today:
                 continue
             before = seen.get(day.date)
-            if not first and before != day.slots:
-                events.append(("tomorrow" if before is None and day.date > today else "changed", day))
-            seen[day.date] = day.slots
+            if not first and before != mark:
+                if mark == EMERGENCY:
+                    kind = "emergency"
+                elif before == EMERGENCY:
+                    kind = "restored"
+                else:
+                    kind = "tomorrow" if before is None and day.date > today else "changed"
+                if not (kind == "emergency" and any(k == kind for k, _ in events)):  # one per download
+                    events.append((kind, day))
+            seen[day.date] = mark
         seen = {d: s for d, s in seen.items() if d >= today}
         if self.stats:
             self.stats.meta("sched_seen", json.dumps(seen))

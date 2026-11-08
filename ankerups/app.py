@@ -116,11 +116,14 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
 
         def text(L: Lang) -> str:
             v = L.t("sc_outages", v=windows_text(day.slots)) if "0" in day.slots else L.t("sc_no_off")
+            day_name = L.t("w_today" if day.date == time.strftime("%Y-%m-%d") else "w_tomorrow").lower()
             if kind == "tomorrow":
                 return L.t("al_sched_tomorrow", group=group, v=v)
-            today = day.date == time.strftime("%Y-%m-%d")
-            return L.t("al_sched_change", day=L.t("w_today" if today else "w_tomorrow").lower(),
-                       group=group, v=v)
+            if kind == "emergency":
+                return L.t("al_sched_emergency", group=group)
+            if kind == "restored":
+                return L.t("al_sched_restored", day=day_name, group=group, v=v)
+            return L.t("al_sched_change", day=day_name, group=group, v=v)
         tg.send(text)
 
     def on_soon(start: float, end: float) -> None:
@@ -233,17 +236,18 @@ async def run(args: argparse.Namespace) -> None:
             if grid is not None:  # the current half hour: the state right now counts too
                 fact = fact[:-1] + ("0" if not grid or fact[-1:] == "0" else "1")
             plan_today = plan_tomorrow = group = ""
-            change = None
+            change, emergency = None, False
             if schedule and schedule.configured:
                 d_today, d_tomorrow = schedule.day(today), schedule.day(today + timedelta(days=1))
                 plan_today = d_today.slots if d_today else ""
+                emergency = bool(d_today and d_today.status == "emergency")
                 plan_tomorrow = d_tomorrow.slots if d_tomorrow else ""
                 group, change = schedule.group, schedule.next_change(now_wall)
             data = widget_data(now_wall, snapshot.get("wall"), grid, since, snapshot["levels"],
                                snapshot["ac_in"], snapshot["out"],
                                snapshot.get("remaining_h") if watchdog.on_battery else None,
                                fact, plan_today, plan_tomorrow, change, group,
-                               datetime.now().hour * 60 + datetime.now().minute)
+                               datetime.now().hour * 60 + datetime.now().minute, emergency)
             return watchdog.name, data
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
