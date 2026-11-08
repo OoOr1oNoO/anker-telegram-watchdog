@@ -262,7 +262,8 @@ async def run(args: argparse.Namespace) -> None:
                 if snapshot.get("remaining_h"):
                     lines.append(L.t("st_remaining", dur=L.dur(snapshot["remaining_h"] * 3600)))
             lines += [L.t("st_power", ac_in=snapshot["ac_in"], out=snapshot["out"]), L.t("st_age", age=age)]
-            if schedule and schedule.configured and (change := schedule.next_change(time.time())):
+            grid_now = None if watchdog.on_battery is None else not watchdog.on_battery
+            if schedule and schedule.configured and (change := schedule.next_change(time.time(), grid_now)):
                 at = time.strftime("%H:%M", time.localtime(change[0]))
                 lines.append(f"📅 {L.t('w_on_at' if change[1] == '1' else 'w_off_at')} {at}")
             return "\n".join(lines)
@@ -285,7 +286,7 @@ async def run(args: argparse.Namespace) -> None:
                 plan_today = d_today.slots if d_today else ""
                 emergency = bool(d_today and d_today.status == "emergency")
                 plan_tomorrow = d_tomorrow.slots if d_tomorrow else ""
-                group, change = schedule.group, schedule.next_change(now_wall)
+                group, change = schedule.group, schedule.next_change(now_wall, grid)
             data = widget_data(now_wall, snapshot.get("wall"), grid, since, snapshot["levels"],
                                snapshot["ac_in"], snapshot["out"],
                                snapshot.get("remaining_h") if watchdog.on_battery else None,

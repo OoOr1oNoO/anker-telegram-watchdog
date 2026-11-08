@@ -202,3 +202,12 @@ def test_emergency_after_restart_takes_the_plan_from_outage_data(schedule, fake)
     schedule.refresh(at(8))
     assert sch.windows_text(schedule.day(TODAY).slots) == "00:00–07:00, 08:00–24:00"
     assert schedule.day(TODAY + timedelta(days=1)).slots == ""  # nothing known for tomorrow
+
+
+def test_next_change_follows_the_actual_grid(schedule):
+    schedule.set("kyiv", "12.1", "x")  # off 00:00-05:30, 09:00-17:30, 19:00-24:00
+    schedule.refresh(at(8))
+    assert schedule.next_change(at(17, 15), grid=True) == (at(19), "0")  # back before 17:30
+    assert schedule.next_change(at(17, 15), grid=False) == (at(17, 30), "1")
+    assert schedule.next_change(at(18), grid=False) is None  # an outage the plan did not have, no "on" ahead today
+    assert schedule.next_change(at(8), grid=True) == (at(9), "0")

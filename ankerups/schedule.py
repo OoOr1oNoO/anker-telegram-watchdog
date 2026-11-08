@@ -263,15 +263,22 @@ class Schedule:
             joined += tomorrow.slots
         return joined, (dt.hour * 60 + dt.minute) // 30
 
-    def next_change(self, now: float) -> tuple[float, str] | None:
-        """(time, new state) of the next change of the planned state, within today and tomorrow."""
+    def next_change(self, now: float, grid: bool | None = None) -> tuple[float, str] | None:
+        """(time, new state) of the next planned change, within today and tomorrow.
+
+        With the actual grid state given, the next change that matters for it: the next planned
+        outage while the power is on (also when it came back before the plan said), the next
+        planned power-on while it is off (also in an outage the plan did not have)."""
         slots, i = self.slots_from(now)
         if i >= len(slots):
             return None
         midnight = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+        target = None if grid is None else ("0" if grid else "1")
         for j in range(i + 1, len(slots)):
-            if slots[j] != slots[i]:
+            if target is None and slots[j] != slots[i]:
                 return (midnight + timedelta(minutes=30 * j)).timestamp(), slots[j]
+            if target is not None and slots[j] == target and slots[j - 1] != target:
+                return (midnight + timedelta(minutes=30 * j)).timestamp(), target
         return None
 
     def run_at(self, ts: float) -> tuple[str, float, float] | None:
