@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from .common import log
 from .i18n import Lang, Render, lang
-from .menus import Controller, Ctx
+from .menus import Controller, Ctx, parse_window
 from .stats import Stats, chart_title
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
@@ -207,7 +207,8 @@ class Telegram:
             self.queue.put(("widget", data, fallback, chat, None, False))
 
     def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render) -> None:
-        params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L)}
+        params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L),
+                  "allow_queries": "true"}  # the light / 12V buttons inside the widget
         try:
             message = self._call("sendWidget", params, timeout=20)["result"]
         except urllib.error.HTTPError as exc:
@@ -291,7 +292,8 @@ class Telegram:
         offset = None
         while True:
             try:
-                params = {"timeout": 50, "allowed_updates": '["message", "callback_query", "my_chat_member"]'}
+                params = {"timeout": 50, "allowed_updates": '["message", "callback_query", "my_chat_member", '
+                                                            '"widget_query"]'}
                 if offset is not None:
                     params["offset"] = offset
                 updates = self._call("getUpdates", params, timeout=60).get("result", [])
@@ -350,6 +352,9 @@ class Telegram:
         if cb := upd.get("callback_query"):
             self._handle_callback(cb, h)
             return
+        if wq := upd.get("widget_query"):
+            self._handle_widget_query(wq, h)
+            return
         msg = upd.get("message") or {}
         chat_obj, sender = msg.get("chat", {}), msg.get("from", {})
         chat, user = str(chat_obj.get("id")), str(sender.get("id"))
@@ -362,6 +367,18 @@ class Telegram:
         users.note(chat, chat_name(chat_obj, sender), sender.get("language_code"),
                    chat_obj.get("type") == "private")
         L = users.lang(chat)
+        if not action and (chat, user) in self.awaiting and self.awaiting[(chat, user)][0] == "autolight":
+            _, asked = self.awaiting.pop((chat, user))
+            if time.time() - asked < 600 and users.is_admin(user):
+                if span := parse_window(text):
+                    window = "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
+                    h.controller.settings.set("autolight", window)
+                    log.info("Auto light hours %s by %s", window, user)
+                    self.reply(chat, *h.controller.render("light", Ctx(L, True, chat, user)), title=True)
+                else:
+                    self.awaiting[(chat, user)] = ("autolight", time.time())
+                    self.reply(chat, L.t("al_auto_bad"), FORCE_REPLY)
+            return
         if not action and (chat, user) in self.awaiting and h.sched:
             kind, asked = self.awaiting.pop((chat, user))
             if time.time() - asked < 600 and users.is_admin(user):
@@ -394,7 +411,8 @@ class Telegram:
     def _ask(self, chat: str, user: str, kind: str, h: BotHandlers) -> None:
         """Ask an admin for typed input (street, house) with a force-reply message."""
         self.awaiting[(chat, user)] = (kind, time.time())
-        self.reply(chat, lambda L: h.sched.prompt(kind, L), FORCE_REPLY)
+        self.reply(chat, (lambda L: L.t("al_auto_ask")) if kind == "autolight" else (lambda L: h.sched.prompt(kind, L)),
+                   FORCE_REPLY)
 
     def _stranger(self, chat: str, name: str, code: str | None) -> None:
         """Someone who is not a user pressed /start (or added the bot to a group)."""
@@ -459,6 +477,8 @@ class Telegram:
                 ctx.L = users.lang(chat)
                 self._edit(msg, h.controller.render("lang", ctx))
                 self.reply(chat, ctx.L.t("lang_title", v=LANG_NAMES[ctx.L.code]))  # refreshes the keyboard
+            elif kind == "a" and rest == "autolight:edit":  # ✏️: own hours for the auto light
+                self._ask(chat, user, "autolight", h)
             elif kind == "a":
                 key, _, value = rest.partition(":")
                 toast, menu = h.controller.act(key, value, ctx)
@@ -477,6 +497,31 @@ class Telegram:
                 toast = ctx.L.t("saved")
         with contextlib.suppress(Exception):
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})
+
+    def _handle_widget_query(self, wq: dict, h: BotHandlers) -> None:
+        """A button inside the status widget: light or DC 12V (admins); the answer is shown on
+        the button for a moment, the new state follows as widget data."""
+        users = self.users
+        chat = str((wq.get("chat") or {}).get("id") or (wq.get("message") or {}).get("chat", {}).get("id"))
+        user = str((wq.get("from") or {}).get("id"))
+        action = wq.get("data") or ""
+        result = ""
+        if users.role(chat) in ACTIVE_ROLES:
+            ctx = Ctx(users.lang(chat), users.is_admin(user), chat, user)
+            if not ctx.admin:
+                result = ctx.L.t("only_admins")
+            elif action in ("light", "dc"):
+                result = h.controller.toggle(action, ctx)
+        log.info("Widget button %s by %s in %s: %s", action, user, chat, result)
+        try:
+            self._call("answerWidgetQuery", {"widget_query_id": wq.get("id"), "data": result})
+        except urllib.error.HTTPError as exc:
+            log.warning("answerWidgetQuery failed: %s %s (update %s)", exc.code,
+                        exc.read().decode(errors="replace")[:200], json.dumps(wq)[:300])
+        except Exception as exc:
+            log.warning("answerWidgetQuery failed: %s", exc)
+        if h.widget and (info := h.widget()):
+            self.update_widgets(info[1])  # the new state right away, not in 15 s
 
     def _user_action(self, rest: str, ctx: Ctx, msg: dict, h: BotHandlers) -> str:
         """u:<action>:<id>[:m] from a request message or the Users menu (":m")."""

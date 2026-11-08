@@ -2,6 +2,7 @@
 """
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,46 @@ CRITICAL_CHOICES = [0, 5, 10, 15, 20]
 
 
 SUMMARY_CHOICES = ["", "07:00", "10:00", "19:00", "23:00"]
+
+
+# auto light: DC 12V on during an outage in these local hours, off again at the end of them;
+# "" = off. The ready choices end by 01:00 (later nobody needs the light); ✏️ sets any time.
+AUTOLIGHT_CHOICES = ["", "17-23", "18-24", "18-01"]
+AUTOLIGHT_MAX_HOURS = 16
+
+
+def parse_window(text: str) -> tuple[int, int] | None:
+    """"18:30-00:30", "18-1", "18.30 – 0.30" -> (start, end) minutes of the day; None if invalid."""
+    parts = re.split(r"\s*[-–—]\s*", text.strip())
+    if len(parts) != 2:
+        return None
+    minutes = []
+    for part in parts:
+        m = re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?", part)
+        if not m or int(m[1]) > 24 or int(m[2] or 0) > 59 or (int(m[1]) == 24 and m[2] not in (None, "00")):
+            return None
+        minutes.append(int(m[1]) * 60 + int(m[2] or 0))
+    start, end = minutes[0] % 1440, minutes[1]
+    length = (end - start) % 1440 or (1440 if end != start else 0)
+    if not 0 < length <= AUTOLIGHT_MAX_HOURS * 60:
+        return None
+    return start, end
+
+
+def in_window(window: str, minute: float) -> bool:
+    """Whether a minute of the day is within the window (it may cross midnight)."""
+    span = parse_window(window) if window else None
+    if not span:
+        return False
+    start, end = span
+    return start <= minute < end if start < end else minute >= start or minute < end % 1440
+
+
+def window_text(L: Lang, window: str) -> str:
+    span = parse_window(window) if window else None
+    if not span:
+        return L.t("off")
+    return "–".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
 
 
 ALERT_FLAGS = {"alert_outage": "f_outage", "alert_full": "f_full", "alert_expansion": "f_expansion",
@@ -116,6 +157,24 @@ class Controller:
             return "btn_12v"
         return None if ("main_battery_soc" in data or "battery_soc" in data) else "btn_light"
 
+    def widget_controls(self) -> tuple[int | None, int | None]:
+        """Light mode and DC 12V switch for the status widget's buttons; None when not reported."""
+        light = as_int(self._state("light")) if self._supported("light") else None
+        dc = as_int(self._state("dc")) if self._supported("dc") else None
+        return light, dc
+
+    def toggle(self, key: str, ctx: Ctx) -> str:
+        """A widget button: the light off <-> high (any other mode counts as on), DC 12V on <-> off.
+        Returns the text the button shows for a moment."""
+        light, dc = self.widget_controls()
+        if key == "light" and light is not None:
+            value = "0" if light else "3"
+        elif key == "dc" and dc is not None:
+            value = "0" if dc else "1"
+        else:
+            return ctx.L.t("unknown")
+        return self.act(key, value, ctx)[0]
+
     def _supported(self, key: str) -> bool:
         return STATION_CONTROLS[key][0] in self.data()
 
@@ -146,6 +205,12 @@ class Controller:
             if self._supported("dc"):
                 lines.append(f"🔌 12V: {self._label('dc', L)}")
                 rows.append(self._row("dc", L, "🔌 12V ", back="@light"))
+                auto = self.settings.get("autolight")
+                lines.append(L.t("al_auto_line", v=window_text(L, auto)))
+                rows.append([{"text": ("•" if c == auto else "") + (c.replace("-", "–") if c else "💡✗"),
+                              "callback_data": f"a:autolight:{c or 'off'}@light"} for c in AUTOLIGHT_CHOICES]
+                            + [{"text": ("•" if auto not in AUTOLIGHT_CHOICES else "") + "✏️",
+                                "callback_data": "a:autolight:edit"}])
             return "\n".join(lines or [L.t("no_light")]), self._markup(L, rows, back=None)
         if menu == "notif":
             th = st.thresholds
@@ -281,6 +346,10 @@ class Controller:
         if key == "flag" and value in ALERT_FLAGS:
             st.set(value, "0" if st.flag(value) else "1")
             return L.t("saved"), "notif"
+        if key == "autolight" and value.partition("@")[0] in ("off", *AUTOLIGHT_CHOICES):
+            choice = value.partition("@")[0]
+            st.set("autolight", "" if choice == "off" else choice)
+            return L.t("saved"), "light"
         if key not in STATION_CONTROLS:
             return L.t("unknown"), "root"
         value, _, back = value.partition("@")  # "@light": pressed in the Light / 12V panel

@@ -95,3 +95,37 @@ def test_emergency_flag_in_data():
     data = json.loads(widget.widget_data(1, 1, True, None, {"main": 50}, 0, 0, None, "", "", "", None, "12.1", 0,
                                          emergency=True))
     assert data["e"] == 1 and "p" not in data
+
+
+def test_widget_buttons_switch_light_and_dc(wbot: FakeBot):
+    from types import SimpleNamespace
+    sent = []
+    wbot.station["dc_output_power_switch"] = 0
+    wbot.controller.device = SimpleNamespace(set_light=lambda **kw: sent.append(("light", kw)),
+                                             set_dc_output=lambda **kw: sent.append(("dc", kw)))
+    assert wbot.controller.widget_controls() == (0, 0)
+    wbot.message(wbot.ADMIN, "📊 Status")
+
+    def tap(data, user=None):
+        wbot.tg._handle_update({"widget_query": {"id": "w1", "from": {"id": int(user or wbot.ADMIN)},
+                                                 "chat": {"id": int(wbot.ADMIN)}, "message_id": 101,
+                                                 "data": data}}, wbot.handlers)
+        return wbot.drain()
+
+    calls = tap("light")
+    assert ("answerWidgetQuery", {"widget_query_id": "w1", "data": "High ✓"}) in calls
+    assert any(m == "editMessageWidgetData" for m, _ in calls)  # the new state at once
+    assert wbot.controller.widget_controls() == (3, 0)  # pending until telemetry catches up
+    tap("light")
+    tap("dc")
+    assert sent == [("light", {"mode": 3}), ("light", {"mode": 0}), ("dc", {"enabled": True})]
+
+
+def test_widget_buttons_admins_only_and_only_when_reported(wbot: FakeBot):
+    wbot.users.upsert("555", role="user")
+    calls = wbot.tg._handle_update({"widget_query": {"id": "w2", "from": {"id": 555}, "chat": {"id": 555},
+                                                     "data": "light"}}, wbot.handlers) or wbot.drain()
+    assert ("answerWidgetQuery", {"widget_query_id": "w2", "data": "Only admins can change this"}) in calls
+    del wbot.station["light_mode"]
+    assert wbot.controller.widget_controls() == (None, None)  # no buttons in the widget
+    assert "allow_queries" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]

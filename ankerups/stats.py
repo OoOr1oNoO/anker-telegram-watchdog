@@ -202,7 +202,7 @@ class Settings:
 
     def get(self, key: str) -> str:
         value = self.stats.meta(f"setting:{key}") if self.stats else None
-        return self.defaults[key] if value is None else value
+        return self.defaults.get(key, "") if value is None else value
 
     def set(self, key: str, value: str) -> None:
         if self.stats:

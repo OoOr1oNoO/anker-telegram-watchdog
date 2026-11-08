@@ -1,11 +1,13 @@
 """Outage, charge and full-charge alerts; Windows power plans and popups.
 """
 
+import json
 import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 from .bot import Telegram
@@ -123,6 +125,26 @@ class Watchdog:
         # kept in the DB so a restart while charging still sends the full-charge alert
         saved = stats.meta("charge_pending") if stats else None
         self.charge_pending: float | None = float(saved) if saved else None
+        # extra line for the outage / grid-back alerts (the planned schedule); set by the app
+        self.note: Callable[[Lang, str, float], str] = lambda L, kind, ts: ""
+
+    def _save_fired(self) -> None:
+        """Thresholds already reported in this outage, kept in the DB: after a restart during an
+        outage only these are skipped, so a threshold crossed around the restart still comes."""
+        if self.stats:
+            state = {k: sorted(v) for k, v in self.fired.items()} | {"!critical": self.critical_fired}
+            self.stats.meta("fired", json.dumps(state) if self.fired or self.critical_fired else "")
+
+    def _load_fired(self) -> bool:
+        try:
+            state = json.loads(self.stats.meta("fired") or "") if self.stats else None
+        except ValueError:
+            state = None
+        if not state:
+            return False
+        self.critical_fired = bool(state.pop("!critical", False))
+        self.fired = {k: set(v) for k, v in state.items()}
+        return True
 
     def _set_charge_pending(self, value: float | None) -> None:
         self.charge_pending = value
@@ -145,9 +167,9 @@ class Watchdog:
                 self.on_battery, self.outage_started = True, start
             if self.on_battery:
                 if self.settings.flag("alert_outage"):
-                    off = self.outage_seconds()
+                    off, at = self.outage_seconds(), time.time()
                     self.tg.send(lambda L: L.t("al_back", dur=L.dur(off) if off else "?",
-                                               charge=L.charge(levels)))
+                                               charge=L.charge(levels)) + self.note(L, "back", at))
                 if self.stats:
                     self.stats.outage_ended(time.time(), total)
                 if min(levels.values()) < 100:  # nothing to report after a short outage
@@ -163,8 +185,10 @@ class Watchdog:
                 self.power.restore()
             self.on_battery = False
             self.outage_started = None
-            self.fired.clear()
-            self.critical_fired = False
+            if self.fired or self.critical_fired:
+                self.fired.clear()
+                self.critical_fired = False
+                self._save_fired()
             return
 
         def left(L: Lang) -> str:
@@ -179,9 +203,11 @@ class Watchdog:
             if resumed:
                 # restarted during an outage: keep its start, do not repeat earlier alerts
                 self.outage_started = resumed
-                for key, pct in levels.items():
-                    self.fired[key] = {t for t in self.settings.thresholds if pct <= t}
-                self.critical_fired = bool(self.settings.critical and total <= self.settings.critical)
+                if not self._load_fired():  # saved by older versions: skip what is already crossed
+                    for key, pct in levels.items():
+                        self.fired[key] = {t for t in self.settings.thresholds if pct <= t}
+                    self.critical_fired = bool(self.settings.critical and total <= self.settings.critical)
+                    self._save_fired()
                 log.info("Resumed outage started %s", datetime.fromtimestamp(resumed))
             else:
                 self.outage_started = time.time() - (now - self.no_grid_since)
@@ -193,9 +219,11 @@ class Watchdog:
                 started = (time.strftime("%H:%M", time.localtime(self.outage_started))
                            if time.time() - self.outage_started >= 60 else None)
                 if self.settings.flag("alert_outage"):
+                    at = self.outage_started
                     self.tg.send(lambda L: L.t("al_lost", name=name, charge=L.charge(levels), left=left(L),
                                                since=L.t("al_since", time=started) if started else "",
-                                               uptime=L.t("al_uptime", dur=L.dur(up)) if up else ""))
+                                               uptime=L.t("al_uptime", dur=L.dur(up)) if up else "")
+                                 + self.note(L, "lost", at))
                 if self.stats:
                     self.stats.outage_started(self.outage_started, total)
             self.power.power_saver()
@@ -208,11 +236,13 @@ class Watchdog:
                 if crossed:
                     t = min(crossed)
                     fired.update(x for x in self.settings.thresholds if x >= t)
+                    self._save_fired()
                     self.tg.send(lambda L, key=key, pct=pct, t=t: L.t(
                         "al_threshold", name=L.battery(key), pct=pct, t=t, charge=L.charge(levels), left=left(L)))
             critical = self.settings.critical
             if critical and total <= critical and not self.critical_fired:
                 self.critical_fired = True
+                self._save_fired()
                 self.tg.send(lambda L: L.t("al_critical", charge=L.charge(levels), left=left(L)))
                 L = self.tg.default
                 show_popup(L.t("popup_title", name=name),

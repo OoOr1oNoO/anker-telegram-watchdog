@@ -23,8 +23,37 @@ def day_text(L: Lang, day: Day | None) -> str:
     if day is None or day.status == "waiting" or (day.status == "ok" and not day.slots):
         return L.t("sc_waiting")
     if day.status == "emergency":
-        return L.t("sc_emergency")
+        plan = (windows_text(day.slots) or L.t("sc_no_off")) if day.slots else ""
+        return L.t("sc_emergency_plan", v=plan) if plan else L.t("sc_emergency")
     return windows_text(day.slots) or L.t("sc_no_off")
+
+
+def alert_note(schedule: Schedule | None, L: Lang, kind: str, ts: float) -> str:
+    """A line for the outage ("lost") and grid-back ("back") alerts comparing them with the schedule."""
+    if not (schedule and schedule.configured):
+        return ""
+    run = schedule.run_at(ts)
+    if not run or run[0] == "?":
+        return ""
+    state, start, end = run
+
+    def hm(t: float) -> str:
+        return datetime.fromtimestamp(t).strftime("%H:%M")
+    if kind == "lost":
+        if state == "0":
+            return "\n" + L.t("sn_until", t=hm(end))
+        nxt = schedule.run_at(end) if end - ts <= 90 * 60 else None
+        if nxt and nxt[0] == "0":
+            return "\n" + L.t("sn_early_off", d=L.dur(end - ts), t=hm(end))
+        return "\n" + L.t("sn_unplanned")
+    if state == "0":
+        return "\n" + L.t("sn_early_on", d=L.dur(end - ts), t=hm(end))
+    late = ts - start
+    if late < 5 * 60:
+        return "\n" + L.t("sn_on_time")
+    if late <= 3 * 3600 and datetime.fromtimestamp(start).strftime("%H:%M") != "00:00":
+        return "\n" + L.t("sn_late_on", d=L.dur(late), t=hm(start))
+    return ""
 
 
 def markup(rows: list[list[dict]]) -> str:

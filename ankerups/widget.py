@@ -34,13 +34,15 @@ body{margin:10px 12px}
 .x .now{outline:1.5px solid var(--tg-theme-text-color)}
 .h{display:flex;justify-content:space-between;margin-left:60px;font-size:10px;color:var(--tg-theme-hint-color)}
 .h i{font-style:normal}
+.k2{display:flex;gap:6px;margin-top:6px}.k2 button{font-size:13px;padding:5px 10px}
 </style>
 <div class=r><span class=t>__NAME__</span><span class=p id=p></span></div>
 <div class=g><div class=c><div class=k>🔋 __BAT__</div><div class=v id=b></div><div class=b><i id=bb></i></div><div class=s id=bs></div></div>
 <div class=c><div class=k>🏠 __LOAD__</div><div class=v id=o></div><div class=s id=os></div></div></div>
 <div class=c style="margin-top:6px"><div class=r><span class=k id=gr></span><span class=s id=nx></span></div>
 <div id=rows></div><div class=h><i>0</i><i>6</i><i>12</i><i>18</i><i>24</i></div></div>
-<div class=s id=u style="text-align:right;margin-top:3px"></div>
+<div class=k2 id=ctl></div>
+<div class=s id=u style="margin-top:3px"></div>
 <script>
 var L=__LABELS__,W=TelegramWidget,D={},$=function(i){return document.getElementById(i)};
 function dur(s){var m=Math.max(0,Math.floor(s/60)),h=Math.floor(m/60),d=Math.floor(h/24),u=L.u;
@@ -59,14 +61,20 @@ var bs=b.length>1?b.map(function(x,i){return(i?L.e+(b.length>2?" "+i:""):L.m)+" 
 if(g===0&&d.r)bs=(bs?bs+" · ":"")+"~"+dur(d.r*3600);$("bs").textContent=bs;
 $("o").textContent=d.o==null?"—":d.o+" W";$("os").textContent=L.in+": "+(d.i==null?"—":d.i+" W");
 var cur=Math.floor((d.m+(t-d.t)/60)/30),rows=strip(L.fact,d.f||"",cur);
-if(d.e)rows+="<div class=l><span>"+L.today+"</span><b style='font-size:12px;color:#da3633'>⚠️ "+L.emg+"</b></div>";
-else if(d.p)rows+=strip(L.today,d.p,cur);if(d.q)rows+=strip(L.tmr,d.q,-1);$("rows").innerHTML=rows;
-$("gr").textContent=d.gr?"📅 "+L.grp+" "+d.gr:"📊 "+L.day;
+if(d.p)rows+=strip(L.today,d.p,cur);if(d.q)rows+=strip(L.tmr,d.q,-1);$("rows").innerHTML=rows;
+var gr=$("gr");gr.textContent=d.e?"⚠️ "+L.emg+" · "+d.gr:d.gr?"📅 "+L.grp+" "+d.gr:"📊 "+L.day;
+gr.style.color=d.e?"#da3633":"";
 var nx="";if(d.x&&d.x[0]>t){nx=(d.x[1]=="1"?L.onat:L.offat)+" "+hm(d.x[0])+" · "+dur(d.x[0]-t);
 if(g===0&&d.x[1]=="1"&&d.r&&avg!=null){var left=d.r*3600-(t-d.t),need=d.x[0]-t;
 nx+=need<left?" · ✓ ≈"+Math.round(avg*(1-need/left))+"%":" · ✗"}}
 $("nx").textContent=nx;$("u").textContent="⟳ "+dur(t-d.u)}
-function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}draw()}
+var shown="";
+function ctl(){var d=D,key=[d.lm,d.dc].join();if(key==shown)return;shown=key;var c=$("ctl");c.innerHTML="";
+if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n));if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n))}
+function add(c,a,t){var b=document.createElement("button");b.textContent=t;b.addEventListener("click",function(){
+b.textContent="…";W.request(a).then(function(r){b.textContent=r.result||t;shown="";setTimeout(ctl,2500)},
+function(e){b.textContent="⚠️ "+(e.code||e);shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
+function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}draw();ctl()}
 load();W.onEvent("chatDataChanged",load);setInterval(draw,10000);W.ready()
 </script>"""
 
@@ -75,6 +83,7 @@ def labels(L: Lang) -> dict:
     return {"on": L.t("w_on"), "off": L.t("w_off"), "m": L.t("bat_main"), "e": L.t("bat_expansion"),
             "in": L.t("w_input"), "fact": L.t("w_fact"), "today": L.t("w_today"), "tmr": L.t("w_tomorrow"),
             "grp": L.t("w_group"), "day": L.t("w_day"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"), "emg": L.t("w_emergency"),
+            "y": L.t("m_on"), "n": L.t("m_off"),
             "u": list(UNITS[L.code][:3])}
 
 
@@ -97,12 +106,12 @@ def widget_data(now: float, telemetry_at: float | None, grid: bool | None, since
                 levels: dict[str, int] | None, ac_in: int | None, out: int | None,
                 remaining_h: float | None, fact: str, plan_today: str, plan_tomorrow: str,
                 next_change: tuple[float, str] | None, group: str, minute_of_day: int,
-                emergency: bool = False) -> str:
+                emergency: bool = False, light: int | None = None, dc: int | None = None) -> str:
     data = {"t": int(now), "u": int(telemetry_at or now), "g": None if grid is None else int(grid),
             "c": int(since) if since else None, "b": list((levels or {}).values()), "i": ac_in, "o": out,
             "r": round(remaining_h, 2) if remaining_h else None, "f": fact, "p": plan_today,
             "q": plan_tomorrow, "x": [int(next_change[0]), next_change[1]] if next_change else None,
-            "gr": group, "m": minute_of_day, "e": 1 if emergency else None}
+            "gr": group, "m": minute_of_day, "e": 1 if emergency else None, "lm": light, "dc": dc}
     text = json.dumps({k: v for k, v in data.items() if v not in (None, "")}, separators=(",", ":"))
     assert len(text.encode()) <= MAX_DATA, len(text)
     return text

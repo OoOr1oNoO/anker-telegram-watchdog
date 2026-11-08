@@ -101,15 +101,23 @@ def test_light_button_hidden_without_light_and_dc(bot: FakeBot):
 def test_light_panel_has_dc_switch(bot: FakeBot):
     bot.station["dc_output_power_switch"] = 0
     calls = bot.message(bot.ADMIN, "🔦 Light")  # the label of keyboards from older versions
-    assert texts(calls)[0].splitlines() == ["🔦 Light: Off", "🔌 12V: Off"]
-    assert buttons(calls[0][1])[-1] == ["🔌 12V On", "• 🔌 12V Off"]
+    assert texts(calls)[0].splitlines() == ["🔦 Light: Off", "🔌 12V: Off", "💡 Auto 12V in an outage: off"]
+    assert buttons(calls[0][1])[-2:] == [["🔌 12V On", "• 🔌 12V Off"], ["•💡✗", "17–23", "18–24", "18–01", "✏️"]]
+    calls = bot.press(bot.ADMIN, "a:autolight:18-01@light")
+    assert toast(calls) == "Saved" and "💡 Auto 12V in an outage: 18:00–01:00" in texts(calls)[0]
+    assert texts(bot.press(bot.ADMIN, "a:autolight:edit")) == ["Send the hours for the auto light, e.g. 18:30-00:30"]
+    assert texts(bot.message(bot.ADMIN, "late")) == [
+        "Could not read it: send the start and the end, e.g. 18:30-00:30 (at most 16 h)"]
+    calls = bot.message(bot.ADMIN, "18.30 - 0.30")
+    assert "💡 Auto 12V in an outage: 18:30–00:30" in texts(calls)[0]
+    assert buttons(calls[0][1])[-1][-1] == "•✏️"
 
 
 def test_light_panel_dc_only_and_stays_open(bot: FakeBot):
     del bot.station["light_mode"]
     bot.station["dc_output_power_switch"] = 0
     calls = bot.message(bot.ADMIN, "🔦 Light/12V")
-    assert texts(calls)[0] == "🔌 12V: Off"
+    assert texts(calls)[0].splitlines()[0] == "🔌 12V: Off"
     calls = bot.message(bot.ADMIN, "/start")
     assert buttons(calls[0][1])[1][0] == "🔌 12V"  # the keyboard button without the light
     sent = []
@@ -117,4 +125,4 @@ def test_light_panel_dc_only_and_stays_open(bot: FakeBot):
     calls = bot.press(bot.ADMIN, "a:dc:1@light")
     assert sent == [{"enabled": True}]
     assert toast(calls) == "On ✓"
-    assert texts(calls)[-1] == "🔌 12V: On"  # the panel is shown again, not Outputs
+    assert texts(calls)[-1].splitlines()[0] == "🔌 12V: On"  # the panel is shown again, not Outputs

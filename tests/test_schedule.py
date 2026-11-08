@@ -38,6 +38,9 @@ class FakeYasno:
         self.calls.append(url)
         if url == sch.OBLAST_URL:
             return OBLAST
+        if url == sch.KYIV_URL:  # outage-data-ua keeps the plan when YASNO shows emergencies
+            return {"fact": {"data": {str(int(TODAY.timestamp())): {
+                "GPV12.1": {**{str(h): "no" for h in range(1, 25)}, "8": "yes"}}}}}
         if "planned-outages" in url:
             return self.schedule
         if "/streets?" in url:
@@ -182,8 +185,20 @@ def test_emergency_outages_announced_and_restored(schedule, fake):
                                       "status": "EmergencyShutdowns"}
     events = schedule.refresh(at(9))
     assert [(k, d.date) for k, d in events] == [("emergency", DATE)]  # one alert for both days
-    assert schedule.next_change(at(9)) is None and schedule.upcoming_outage(at(8, 40)) is None
+    today = schedule.day(TODAY)
+    assert today.status == "emergency" and sch.windows_text(today.slots).startswith("00:00–05:30")  # plan kept
+    assert schedule.next_change(at(9)) == (at(17, 30), "1")
     assert schedule.refresh(at(10)) == []
     fake.schedule["12.1"]["today"] = saved
     events = schedule.refresh(at(11))
     assert [(k, d.date) for k, d in events] == [("restored", DATE)]
+
+
+def test_emergency_after_restart_takes_the_plan_from_outage_data(schedule, fake):
+    for key in ("today", "tomorrow"):
+        fake.schedule["12.1"][key] = {"slots": [], "date": (DATE if key == "today" else NEXT) + "T00:00:00+02:00",
+                                      "status": "EmergencyShutdowns"}
+    schedule.set("kyiv", "12.1", "x")
+    schedule.refresh(at(8))
+    assert sch.windows_text(schedule.day(TODAY).slots) == "00:00–07:00, 08:00–24:00"
+    assert schedule.day(TODAY + timedelta(days=1)).slots == ""  # nothing known for tomorrow

@@ -20,7 +20,9 @@ from .common import log
 
 YASNO = "https://app.yasno.ua/api/blackout-service/public/shutdowns"
 KYIV_REGION, KYIV_DSO = 25, 902
-OBLAST_URL = "https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data/kyiv-region.json"
+OUTAGE_DATA = "https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data"
+OBLAST_URL = f"{OUTAGE_DATA}/kyiv-region.json"
+KYIV_URL = f"{OUTAGE_DATA}/kyiv.json"  # the same Kyiv groups as YASNO; keeps the plan in emergencies
 SOURCES = ("kyiv", "oblast")
 FETCH_EVERY = 600  # seconds between schedule downloads
 WARN_BEFORE = 30 * 60  # outage warning this long before a planned outage
@@ -182,10 +184,26 @@ class Schedule:
             self.stats.meta("sched_seen", "")  # new group: no "changed" alerts for the old one
 
     def download(self) -> list[Day]:
-        if self.source == "kyiv":
-            return yasno_days(self.fetch(f"{YASNO}/regions/{KYIV_REGION}/dsos/{KYIV_DSO}/planned-outages"),
-                              self.group)
-        return oblast_days(self.fetch(OBLAST_URL), self.group)
+        if self.source != "kyiv":
+            return oblast_days(self.fetch(OBLAST_URL), self.group)
+        days = yasno_days(self.fetch(f"{YASNO}/regions/{KYIV_REGION}/dsos/{KYIV_DSO}/planned-outages"), self.group)
+        plans = json.loads(self.stats.meta("sched_plan") or "{}") if self.stats else {}
+        for day in days:  # the last published plan, kept for emergency outages
+            if day.status == "ok" and day.slots:
+                plans[day.date] = day.slots
+        if any(d.status == "emergency" and d.date not in plans for d in days):
+            try:  # emergency outages and no plan of our own (e.g. after a restart)
+                plans |= {d.date: d.slots for d in oblast_days(self.fetch(KYIV_URL), self.group)
+                          if d.date not in plans}
+            except Exception as exc:
+                log.warning("outage-data-ua download failed: %s", exc)
+        for day in days:
+            if day.status == "emergency":
+                day.slots = plans.get(day.date, "")
+        if self.stats:
+            today = datetime.now().strftime("%Y-%m-%d")
+            self.stats.meta("sched_plan", json.dumps({d: s for d, s in plans.items() if d >= today}))
+        return days
 
     def refresh(self, now: float | None = None) -> list[tuple[str, Day]]:
         """Download when due; returns events: ("tomorrow", day) when the next day's schedule is
@@ -255,6 +273,20 @@ class Schedule:
             if slots[j] != slots[i]:
                 return (midnight + timedelta(minutes=30 * j)).timestamp(), slots[j]
         return None
+
+    def run_at(self, ts: float) -> tuple[str, float, float] | None:
+        """(planned state, start, end) of the run of equal slots around ts (today and tomorrow)."""
+        slots, i = self.slots_from(ts)
+        if i >= len(slots):
+            return None
+        a = b = i
+        while a > 0 and slots[a - 1] == slots[i]:
+            a -= 1
+        while b < len(slots) and slots[b] == slots[i]:
+            b += 1
+        midnight = datetime.fromtimestamp(ts).replace(hour=0, minute=0, second=0, microsecond=0)
+        return slots[i], (midnight + timedelta(minutes=30 * a)).timestamp(), \
+            (midnight + timedelta(minutes=30 * b)).timestamp()
 
     def upcoming_outage(self, now: float) -> tuple[float, float] | None:
         """(start, end) of a planned outage starting within WARN_BEFORE, warned once."""

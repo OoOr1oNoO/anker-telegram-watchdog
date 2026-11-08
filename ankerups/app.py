@@ -45,10 +45,10 @@ from .common import (
     log,
 )
 from .i18n import Lang, lang
-from .menus import Controller
+from .menus import Controller, Ctx, in_window
 from .stats import Settings, Stats, chart_title
 from .users import Users
-from .schedmenu import ScheduleMenu
+from .schedmenu import ScheduleMenu, alert_note
 from .schedule import Day, Schedule, run_schedule, windows_text
 from .watchdog import PowerPlan, Watchdog, battery_state
 from .widget import widget_data
@@ -139,6 +139,47 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
     threading.Thread(target=run_schedule, args=(schedule, on_event, on_soon), daemon=True).start()
 
 
+def autolight_step(watchdog: Watchdog, controller: Controller, settings: Settings, tg: Telegram,
+                   meta: Callable, now: datetime) -> None:
+    """Auto light: DC 12V (a USB lamp in a 12V adapter) on while an outage falls in the chosen
+    hours, off again after it, but only if the bot turned it on (meta "autolight": on / skip)."""
+    window = settings.get("autolight")  # an invalid one (e.g. 24 h from a test build) counts as off
+    want = bool(window and watchdog.on_battery and controller._supported("dc")
+                and in_window(window, now.hour * 60 + now.minute))
+    state = meta("autolight") or ""
+    ctx = Ctx(tg.default, True, "auto", "auto light")
+    if want and not state:
+        if controller.widget_controls()[1] == 1:
+            meta("autolight", "skip")  # already on: leave it to whoever turned it on
+            return
+        if controller.act("dc", "1", ctx)[0] != tg.default.t("cmd_failed"):
+            meta("autolight", "on")
+            tg.send(lambda L: L.t("al_auto_on"))
+    elif not want and state:
+        meta("autolight", "")
+        if state == "on" and controller.widget_controls()[1] == 1:
+            controller.act("dc", "0", ctx)
+            tg.send(lambda L: L.t("al_auto_off"))
+
+
+def run_autolight(watchdog: Watchdog, controller: Controller, settings: Settings, tg: Telegram,
+                  stats: Stats | None) -> None:
+    store: dict[str, str] = {}
+
+    def meta(key: str, value: str | None = None) -> str | None:
+        if stats:
+            return stats.meta(key, value)
+        if value is not None:
+            store[key] = value
+        return store.get(key)
+    while True:
+        time.sleep(30)
+        try:
+            autolight_step(watchdog, controller, settings, tg, meta, datetime.now())
+        except Exception:
+            log.exception("Auto light failed")
+
+
 def ping_healthcheck(url: str) -> None:
     """Dead man's switch (e.g. healthchecks.io): the service alerts when the pings stop."""
     def ping() -> None:
@@ -169,10 +210,12 @@ async def run(args: argparse.Namespace) -> None:
         "alert_outage": "1", "alert_full": "1", "alert_expansion": "1", "alert_link": "1",
         "sched_source": "", "sched_group": "", "sched_label": "",
         "alert_sched_soon": "1", "alert_sched_tomorrow": "1", "alert_sched_change": "1",
+        "autolight": "",
     })
     schedule = Schedule(settings, stats) if stats else None
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
                         full_confirm_s=args.full_confirm)
+    watchdog.note = lambda L, kind, ts: alert_note(schedule, L, kind, ts)
     healthcheck = os.environ.get("HEALTHCHECK_URL", "").strip()
 
     if args.test_telegram:
@@ -247,7 +290,8 @@ async def run(args: argparse.Namespace) -> None:
                                snapshot["ac_in"], snapshot["out"],
                                snapshot.get("remaining_h") if watchdog.on_battery else None,
                                fact, plan_today, plan_tomorrow, change, group,
-                               datetime.now().hour * 60 + datetime.now().minute, emergency)
+                               datetime.now().hour * 60 + datetime.now().minute, emergency,
+                               *controller.widget_controls())
             return watchdog.name, data
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
@@ -265,6 +309,8 @@ async def run(args: argparse.Namespace) -> None:
             handlers.sched = controller.sched = ScheduleMenu(schedule)
             handlers.widget, controller.widgets = widget_info, True
             start_schedule(tg, schedule, settings, lambda: last_levels)
+        threading.Thread(target=run_autolight, args=(watchdog, controller, settings, tg, stats),
+                         daemon=True).start()
         tg.listen_commands(handlers)
         while True:
             await asyncio.sleep(1)

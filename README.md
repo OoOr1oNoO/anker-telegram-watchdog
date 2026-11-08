@@ -10,14 +10,18 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 - **📊 Status** button in the bot: a live dashboard right in the chat (a Telegram widget the bot
   keeps updating): grid state and for how long, charge, load, remaining time, today's grid
   history next to the planned outage schedule, the next planned change and whether the battery
-  lasts until then. Telegram apps without widgets (e.g. older desktop versions) can switch the
+  lasts until then, plus 🔦 light and 🔌 12V on/off buttons for admins. Telegram apps without widgets (e.g. older desktop versions) can switch the
   chat to a text status in **⚙️ Settings**
 - **📅 Outage schedule** (Ukraine): Kyiv by street and house (YASNO), Kyiv region by group
   ([outage-data-ua](https://github.com/Baskerville42/outage-data-ua)); alerts 30 minutes
   before a planned outage, when tomorrow's schedule is published, when a schedule changes and
-  when emergency outages replace it (and when it applies again)
+  when emergency outages are announced (the last schedule stays visible, marked as emergency).
+  The outage and grid-back alerts say how they compare with the schedule ("20 min earlier
+  than the schedule", "not in the schedule")
 - **🔦 Light/12V** button: switch the station light (off / low / medium / high / blink) and the
-  DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light)
+  DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light).
+  **💡 Auto light**: during an outage in the evening (17–23, 18–24, 18–01 or your own hours)
+  the bot turns the 12V output on, and off again when the power is back or the hours end
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
   outages and energy by month, energy through the station (kWh in / out) and a daily summary
   with a chart (data is kept in `anker_ups.db` next to the script)
