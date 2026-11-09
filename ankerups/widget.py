@@ -27,13 +27,16 @@ body{margin:10px 12px}
 .b{height:5px;background:var(--tg-theme-section-separator-color);border-radius:3px;margin-top:3px}
 .b i{display:block;height:5px;border-radius:3px;background:#2ea043}
 .l{display:flex;align-items:center;gap:6px;margin-top:4px}
-.l span{width:54px;font-size:11px;color:var(--tg-theme-hint-color)}
-.x{flex:1;display:block}.x line{stroke:var(--tg-theme-section-separator-color)}
+.l span{flex:0 0 62px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;color:var(--tg-theme-hint-color)}
+.x{flex:1;min-width:0;width:100%;display:block}.x line{stroke:var(--tg-theme-section-separator-color)}
 .x .on{stroke:#2ea043}.x .off{stroke:#da3633}.x .may{stroke:#e3b341}.x .part{stroke:#f0883e}
-.tk{margin:1px 0 0 60px;height:7px;color:var(--tg-theme-hint-color)}.tk svg{display:block}
-.h{display:flex;margin-left:57px;font-size:10px;color:var(--tg-theme-hint-color)}
+.tk{margin:1px 0 0 68px;height:7px;color:var(--tg-theme-hint-color)}.tk svg{display:block}
+.h{display:flex;margin-left:65px;font-size:10px;color:var(--tg-theme-hint-color)}
 .h i{flex:1;font-style:normal;display:flex;justify-content:space-between}
-.k2{display:flex;gap:6px;margin-top:6px}.k2 button{font-size:13px;padding:5px 10px}
+.k2{display:flex;gap:6px;margin-top:8px}
+.k2 b{display:flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:8px;font-size:13px;
+background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}.k2 b.a{background:#2ea043;color:#fff}
+.k2 svg{display:block}
 </style>
 <div class=r><span class=t>__NAME__</span><span class=p id=p></span></div>
 <div class=g><div class=c><div class=k>🔋 __BAT__</div><div class=v id=b></div><div class=b><i id=bb></i></div><div class=s id=bs></div></div>
@@ -49,7 +52,7 @@ if(m<60)return m+u[2];if(h<24)return h+u[1]+" "+String(m%60).padStart(2,"0")+u[2
 function now(){return Date.now()/1000}
 function hm(t){var d=new Date(t*1000);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}
 function cls(c){return c=="1"?"on":c=="0"?"off":c=="?"?"may":c=="p"?"part":"e"}
-function strip(name,s,cur){var h="<div class='l'><span>"+name+"</span><svg class='x' viewBox='0 0 480 11' preserveAspectRatio='none' height='11'>",i=0;
+function strip(name,s,cur){var h="<div class='l'><span>"+name+"</span><svg class='x' viewBox='0 0 480 11' preserveAspectRatio='none' width='100%' height='11'>",i=0;
 while(i<48){var k=cls(s[i]),j=i+1;while(j<48&&cls(s[j])==k)j++;
 h+="<line x1='"+i*10+"' y1='5.5' x2='"+j*10+"' y2='5.5' stroke-width='11' stroke-dasharray='8.6 1.4' class='"+k+"'/>";i=j}
 if(cur>=0&&cur<48)h+="<rect x='"+(cur*10+.4)+"' y='.75' width='7.8' height='9.5' fill='none' stroke='currentColor' stroke-width='1.5' vector-effect='non-scaling-stroke'/>";
@@ -73,11 +76,14 @@ nx+=need<left?" · ✓ ≈"+Math.round(avg*(1-need/left))+"%":" · ✗"}}
 $("nx").textContent=nx;$("u").textContent="⟳ "+dur(t-d.u)}
 var shown="",rkey="";
 function ctl(){var d=D,key=[d.lm,d.dc].join();if(key==shown)return;shown=key;var c=$("ctl");c.innerHTML="";
-if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n),d.lm);if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n),d.dc);add(c,"qs","⚙️",0)}
-function add(c,a,t,on){var b=document.createElement("button");b.textContent=t;
-if(on){b.style.background="#2ea043";b.style.color="#fff"}b.addEventListener("click",function(){
-b.textContent="…";W.request(a).then(function(r){b.textContent=r.result||t;shown="";setTimeout(ctl,2500)},
-function(e){b.textContent="⚠️ "+(e.code||e);shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
+if(d.lm!=null)add(c,"light",IC[0]+(d.lm?L.y:L.n),d.lm);if(d.dc!=null)add(c,"dc",IC[1]+"12V "+(d.dc?L.y:L.n),d.dc);add(c,"qs",IC[2],0)}
+var SV="<svg viewBox='0 0 24 24' width='18' height='18' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>",
+IC=[SV+"<path d='M8 2.5h8v3.5l-2 3.2V21a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V9.2L8 6z'/><path d='M8 6h8'/></svg>",
+SV+"<circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4.5'/><circle cx='12' cy='12' r='1.4' fill='currentColor'/></svg>",
+SV+"<circle cx='12' cy='12' r='6.3'/><circle cx='12' cy='12' r='2.4'/><path stroke-width='3.2' stroke-linecap='butt' d='M12 2.4v3.4M12 18.2v3.4M2.4 12h3.4M18.2 12h3.4M5.2 5.2l2.4 2.4M16.4 16.4l2.4 2.4M5.2 18.8l2.4-2.4M16.4 7.6l2.4-2.4'/></svg>"];
+function add(c,a,t,on){var b=document.createElement("b");b.innerHTML=t;if(on)b.className="a";
+b.addEventListener("click",function(){if(a!="qs")b.className=on?"":"a";W.request(a).then(function(){shown="";setTimeout(ctl,1500)},
+function(){shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
 function ticks(){var t="";for(var i=0;i<=48;i+=2)t+="M"+Math.min(i*10,479.5)+" 0v"+(i%12==0?7:i%6==0?5:3);
 $("tk").innerHTML="<svg viewBox='0 0 480 7' preserveAspectRatio='none' width='100%' height='7'><path d='"+t+
 "' stroke='currentColor' stroke-width='1' vector-effect='non-scaling-stroke'/></svg>"}
