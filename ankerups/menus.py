@@ -12,6 +12,7 @@ from .i18n import Lang, lang
 from .stats import Settings
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, STATUS_STYLES, Users
+from .widget_quick import quick_data
 
 
 @dataclass
@@ -189,6 +190,33 @@ class Controller:
         light = as_int(self._state("light")) if self._supported("light") else None
         dc = as_int(self._state("dc")) if self._supported("dc") else None
         return light, dc
+
+    def quick_data(self) -> str:
+        """Chat data of the ⚙️ Quick settings widget: the controls the station reports."""
+        def state(key: str) -> int | None:
+            return as_int(self._state(key)) if self._supported(key) else None
+        light, dc = self.widget_controls()
+        limits = [int(v) for v in STATION_CONTROLS["limit"][1]]
+        return quick_data({"lm": light, "dc": dc, "fast": state("fast"), "disp": state("disp"), "lim": state("limit")},
+                          limits, self.settings.get("autolight") if dc is not None else None)
+
+    def quick_action(self, action: str, ctx: Ctx) -> str:
+        """A control of the Quick settings widget; returns a short result for the widget."""
+        key, _, value = action.partition(":")
+        if key in ("light", "dc"):
+            return self.toggle(key, ctx)
+        if key == "fast" and self._supported("fast"):
+            return self.act("fast", "0" if self._state("fast") == "1" else "1", ctx)[0]
+        if key == "disp" and self._supported("disp"):
+            return self.act("disp", str((as_int(self._state("disp")) or 0) + 1 & 3), ctx)[0]
+        if key == "limit" and value in STATION_CONTROLS["limit"][1]:
+            return self.act("limit", value, ctx)[0]
+        if key == "auto" and value == "off":
+            self.settings.set("autolight", "")
+            return ctx.L.t("saved")
+        if key == "auto" and self.text_setting("autolight", value, ctx):
+            return ctx.L.t("saved")
+        return ctx.L.t("unknown")
 
     def toggle(self, key: str, ctx: Ctx) -> str:
         """A widget button: the light off <-> high (any other mode counts as on), DC 12V on <-> off.

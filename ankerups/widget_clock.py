@@ -12,12 +12,12 @@ from .translations import UNITS
 
 TEMPLATE = """<style>
 body{margin:0;background:linear-gradient(160deg,#252a33,#111317);color:#f2f2f7}
-.w{padding:14px 14px 12px}.r{display:flex;justify-content:space-between;align-items:center}
-.nm{font-weight:700;font-size:16px}.hn{font-size:11px;color:#8e8e93}
+.w{padding:14px}.r{display:flex;justify-content:space-between;align-items:center}
+.nm{font-weight:700;font-size:16px}
 .ch{font-size:11px;font-weight:700;padding:3px 9px;border-radius:10px;color:#111}
 .m{display:flex;align-items:center;gap:6px;margin-top:6px}
 #dl{flex:0 0 176px;height:176px}.c{flex:1;display:flex;flex-direction:column;gap:9px}
-.k{font-size:10px;font-weight:700;letter-spacing:1px;color:#8e8e93}
+.k{font-size:10px;font-weight:600;color:#8e8e93}
 .io{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:700}.io svg{flex:0 0 22px}
 .big{font-size:24px;font-weight:800}.sm{font-size:12px;color:#8e8e93}
 .bt{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:#c7c7cc}
@@ -29,9 +29,9 @@ background:#2c2f36;color:#f2f2f7}.k2 button.a{background:#f2f2f7;color:#111}
 </style>
 <div class=w><div class=r><span class=nm>__NAME__</span><span class=ch id=ch></span></div>
 <div class=m><div id=dl></div><div class=c>
-<div><div class=k>IN · OUT</div><div class=io>__PLUG__<span id=i></span></div><div class=io>__HOME__<span id=o></span></div></div>
+<div><div class=io>__PLUG__<span id=i></span></div><div class=io>__HOME__<span id=o></span></div></div>
 <div><div class=k id=nk></div><div class=big id=nt></div><div class=sm id=fc></div></div></div></div>
-<div id=bt></div><div class=r><span class=hn id=u></span><div class=k2 id=ctl></div></div></div>
+<div id=bt></div><div class=r><span class=sm id=u></span><div class=k2 id=ctl></div></div></div>
 <script>
 var L=__LABELS__,W=TelegramWidget,D={},$=function(i){return document.getElementById(i)},key="",shown="";
 function dur(s){var m=Math.max(0,Math.floor(s/60)),h=Math.floor(m/60),d=Math.floor(h/24),u=L.u;
@@ -57,11 +57,11 @@ for(i=0;i<24;i++)tk+="M"+pt(87,i*15)+"L"+pt(i%3?90:94,i*15);
 var lb=["0","6","12","18"].map(function(x,j){var q=pt(102,j*90).split(" ");return T(q[0],+q[1]+3,"9","#8e8e93",x)}).join("");
 var hp=pt(91,a).split(" "),dt=new Date(),hh=String(dt.getHours()).padStart(2,"0"),mm=String(dt.getMinutes()).padStart(2,"0"),
 ctr=pm?lcd(n,100-(n.length*22-4)/2-5,74,c)+"<text x='"+(100+(n.length*22-4)/2-1)+"' y='106' font-size='11' font-weight='700' fill='"+c+"'>%</text>"
-:lcd(hh,53,74,c)+"<g id='cl' fill='"+c+"'><rect x='98' y='82' width='4' height='4' rx='1'/><rect x='98' y='96' width='4' height='4' rx='1'/></g>"+lcd(mm,109,74,c);
+:lcd(hh,53,74,c)+"<g id='cl' fill='"+c+"'><path d='M98 82h4v4h-4zM98 96h4v4h-4z'/></g>"+lcd(mm,109,74,c);
 $("dl").innerHTML="<svg viewBox='-12 -12 224 224' width='176' height='176'>"+
 "<g fill='none' stroke-width='8' stroke-linecap='round'>"+s+"</g>"+
 "<path d='"+tk+"' stroke='#636366' stroke-width='1.4' stroke-linecap='round'/>"+lb+
-"<circle cx='100' cy='100' r='56' fill='"+(g===0?"#231c12":"#121f17")+"' stroke='#22262d'/>"+
+"<circle cx='100' cy='100' r='56' fill='"+(g===0?"#231c12":"#121f17")+"'/>"+
 "<path d='M"+pt(60,a)+"L"+pt(91,a)+"' stroke='#f2f2f7' stroke-width='2.4' stroke-linecap='round'/>"+
 "<circle cx='"+hp[0]+"' cy='"+hp[1]+"' r='3.5' fill='#f2f2f7'/>"+
 ctr+
@@ -83,15 +83,15 @@ var SV="<svg viewBox='0 0 24 24' width='22' height='22' fill='none' stroke='curr
 IL=SV+"<path d='M8 2.5h8v3.5l-2 3.2V21a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V9.2L8 6z'/><path d='M8 6h8'/><circle cx='12' cy='13' r='1.3' fill='currentColor'/></svg>",
 ID=SV+"<circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4.5'/><circle cx='12' cy='12' r='1.4' fill='currentColor'/><path d='M12 3v2.5'/></svg>";
 function ctl(){var d=D,k=[d.lm,d.dc].join();if(k==shown)return;shown=k;var c=$("ctl");c.innerHTML="";
-if(d.lm!=null)add(c,"light",IL,d.lm);if(d.dc!=null)add(c,"dc",ID,d.dc)}
+if(d.lm!=null)add(c,"light",IL,d.lm);if(d.dc!=null)add(c,"dc",ID,d.dc);add(c,"qs",SV+"<circle cx='12' cy='12' r='6.3'/><circle cx='12' cy='12' r='2.4'/><path stroke-width='3.2' stroke-linecap='butt' d='M12 2.4v3.4M12 18.2v3.4M2.4 12h3.4M18.2 12h3.4M5.2 5.2l2.4 2.4M16.4 16.4l2.4 2.4M5.2 18.8l2.4-2.4M16.4 7.6l2.4-2.4'/></svg>",0)}
 function add(c,a,t,on){var b=document.createElement("button");b.innerHTML=t;if(on)b.className="a";
 b.addEventListener("click",function(){b.className=on?"":"a";W.request(a).then(function(){shown="";setTimeout(ctl,1500)},
 function(){b.textContent="⚠️";shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
 function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}tick();ctl()}
 var pm=false,CC="",on=true;
-setInterval(function(){var e=$("cl");if(e){on=!on;e.setAttribute("fill",on?CC:"#262a31")}},1000);try{pm=localStorage.getItem("pm")=="1"}catch(e){}
+setInterval(function(){var e=$("cl");if(e&&!document.hidden){on=!on;e.setAttribute("fill",on?CC:"#262a31")}},1000);try{pm=localStorage.getItem("pm")=="1"}catch(e){}
 $("dl").addEventListener("click",function(){pm=!pm;try{localStorage.setItem("pm",pm?"1":"0")}catch(e){}tick()});
-load();W.onEvent("chatDataChanged",load);setInterval(tick,10000);W.ready()
+load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick()}setInterval(vf,10000);document.addEventListener("visibilitychange",vf);W.ready()
 </script>"""
 
 PLUG = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "

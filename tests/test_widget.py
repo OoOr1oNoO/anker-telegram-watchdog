@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-from ankerups import widget, widget_clock, widget_ios
+from ankerups import widget, widget_clock, widget_ios, widget_quick
 from ankerups.i18n import lang
 from ankerups.schedmenu import ScheduleMenu
 from ankerups.translations import LANGS
@@ -17,10 +17,11 @@ DATA = widget.widget_data(1794139367, 1794139364, False, 1794133607, {"main": 10
 
 
 @pytest.mark.parametrize("code", LANGS)
-@pytest.mark.parametrize("module", [widget, widget_ios, widget_clock])
+@pytest.mark.parametrize("module", [widget, widget_ios, widget_clock, widget_quick])
 def test_html_fits_telegram_limits(code, module):
     html = module.widget_html(lang(code), "Anker <SOLIX> C1000X")
-    assert len(html.encode()) <= 32768 and widget.compressed_size(html) <= 3800
+    # Telegram refuses more than 4096 compressed bytes; ~200 bytes of margin for zlib differences
+    assert len(html.encode()) <= 32768 and widget.compressed_size(html) <= 3900
     assert "&lt;SOLIX&gt;" in html and "__" not in html
 
 
@@ -72,12 +73,12 @@ def test_status_style_per_chat(wbot: FakeBot):
     calls = wbot.message(wbot.ADMIN, "⚙️ Settings")
     assert buttons(calls[0][1])[-1] == ["📊 Status look: Classic"]
     calls = wbot.press(wbot.ADMIN, "m:style")
-    assert buttons(calls[0][1])[:2] == [["• Classic", "iOS"], ["Clock", "Text"]]
+    assert buttons(calls[0][1])[:2] == [["• Classic", "Modern"], ["Clock", "Text"]]
     calls = wbot.press(wbot.ADMIN, "v:ios")
-    assert toast(calls) == "Saved" and buttons(calls[0][1])[0] == ["Classic", "• iOS"]
+    assert toast(calls) == "Saved" and buttons(calls[0][1])[0] == ["Classic", "• Modern"]
     assert "CHARGE AT POWER-ON" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]
     wbot.press(wbot.ADMIN, "v:clock")
-    assert "IN · OUT" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]
+    assert "pathLength" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]  # the clock dial
     wbot.press(wbot.ADMIN, "v:text")
     assert texts(wbot.message(wbot.ADMIN, "📊 Status")) == ["📊 Station\nen"]
     assert wbot.message(wbot.GROUP, "/status", kind="group")[0][0] == "sendWidget"  # other chats keep it
@@ -143,3 +144,86 @@ def test_widget_buttons_admins_only_and_only_when_reported(wbot: FakeBot):
     del wbot.station["light_mode"]
     assert wbot.controller.widget_controls() == (None, None)  # no buttons in the widget
     assert "allow_queries" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]
+
+
+def test_new_status_replaces_the_old_widget_of_the_same_look(wbot: FakeBot):
+    wbot.message(wbot.ADMIN, "📊 Status")  # message 101, classic
+    calls = wbot.message(wbot.ADMIN, "📊 Status")  # 102 replaces 101
+    assert ("deleteMessage", {"chat_id": wbot.ADMIN, "message_id": 101}) in calls
+    wbot.press(wbot.ADMIN, "v:clock")
+    calls = wbot.message(wbot.ADMIN, "📊 Status")  # another look: the classic one stays
+    assert "deleteMessage" not in dict(calls)
+    assert sorted(m for m, _ in wbot.tg._widgets().values()) == [102, 103]
+
+
+def test_widgets_saved_by_older_versions_count_as_classic(wbot: FakeBot):
+    wbot.users.stats.meta("widgets", json.dumps({wbot.ADMIN: [55, int(__import__("time").time())]}))
+    calls = wbot.message(wbot.ADMIN, "📊 Status")
+    assert ("deleteMessage", {"chat_id": wbot.ADMIN, "message_id": 55}) in calls
+
+
+def tap(bot: FakeBot, data: str, user=None):
+    bot.tg._handle_update({"widget_query": {"id": "q1", "from": {"id": int(user or bot.ADMIN)},
+                                            "chat": {"id": int(bot.ADMIN)}, "data": data}}, bot.handlers)
+    return bot.drain()
+
+
+@pytest.fixture
+def qbot(wbot: FakeBot):
+    from types import SimpleNamespace
+    wbot.handlers.quick = wbot.controller.quick_data
+    wbot.station["dc_output_power_switch"] = 0
+    wbot.sent = []
+    wbot.controller.device = SimpleNamespace(
+        set_fast_charging=lambda **kw: wbot.sent.append(("fast", kw)), set_display=lambda **kw: wbot.sent.append(("disp", kw)),
+        set_charge_limit=lambda **kw: wbot.sent.append(("limit", kw)), set_light=lambda **kw: wbot.sent.append(("light", kw)),
+        set_dc_output=lambda **kw: wbot.sent.append(("dc", kw)))
+    return wbot
+
+
+def test_quick_settings_open_from_the_status_widget(qbot: FakeBot):
+    calls = tap(qbot, "qs")
+    params = dict(calls)["sendWidget"]
+    assert "Quick settings" in params["html"]
+    data = json.loads(params["chat_data"])
+    assert data == {"lm": 0, "dc": 0, "fast": 1, "disp": 2, "lim": 800, "lims": [200, 400, 600, 800, 1000],
+                    "a": 13, "b": 25, "on": 0, "st": "widget"}
+    assert "|quick" in "".join(qbot.tg._widgets())
+
+
+def test_quick_settings_controls(qbot: FakeBot, settings):
+    tap(qbot, "fast")
+    tap(qbot, "disp")
+    tap(qbot, "limit:600")
+    assert qbot.sent == [("fast", {"enabled": False}), ("disp", {"mode": 3}), ("limit", {"max_watts": 600})]
+    tap(qbot, "auto:18:30-00:30")
+    assert settings.get("autolight") == "18:30-00:30"
+    assert json.loads(qbot.controller.quick_data())["on"] == 1
+    tap(qbot, "auto:off")
+    assert settings.get("autolight") == ""
+    assert ("answerWidgetQuery", {"widget_query_id": "q1", "data": "Unknown action"}) in tap(qbot, "limit:123")
+
+
+def test_quick_settings_look_for_anyone_and_admin_only_controls(qbot: FakeBot):
+    qbot.users.upsert("555", role="user")
+    calls = qbot.tg._handle_update({"widget_query": {"id": "q2", "from": {"id": 555}, "chat": {"id": 555},
+                                                     "data": "look:clock"}}, qbot.handlers) or qbot.drain()
+    assert qbot.users.status_style("555") == "clock" and "pathLength" in dict(calls)["sendWidget"]["html"]
+    calls = qbot.tg._handle_update({"widget_query": {"id": "q3", "from": {"id": 555}, "chat": {"id": 555},
+                                                     "data": "fast"}}, qbot.handlers) or qbot.drain()
+    assert ("answerWidgetQuery", {"widget_query_id": "q3", "data": "Only admins can change this"}) in calls
+    assert qbot.sent == []
+
+
+def test_auto_light_window_on_the_range():
+    from ankerups.widget_quick import auto_slots, with_look
+    assert auto_slots("18:30-00:30") == (13, 25, 1)
+    assert auto_slots("") == (13, 25, 0)
+    assert auto_slots("20-06") == (16, 32, 1)  # past 04:00: to the end of the range
+    assert with_look("{}", "ios") == '{"st":"ios"}' and with_look('{"a":1}', "text") == '{"a":1,"st":"text"}'
+
+
+def test_back_to_status_from_quick_settings(qbot: FakeBot):
+    qbot.press(qbot.ADMIN, "v:ios")
+    calls = tap(qbot, "status")
+    assert "CHARGE AT POWER-ON" in dict(calls)["sendWidget"]["html"]

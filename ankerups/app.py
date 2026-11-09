@@ -342,6 +342,7 @@ async def run(args: argparse.Namespace) -> None:
         if schedule:
             handlers.sched = controller.sched = ScheduleMenu(schedule)
             handlers.widget, controller.widgets = widget_info, True
+            handlers.quick = controller.quick_data
             def hint(start: float):
                 limit = as_int(controller._state("limit")) if controller._supported("limit") else None
                 limits = [int(v) for v in STATION_CONTROLS["limit"][1]] if limit is not None else []

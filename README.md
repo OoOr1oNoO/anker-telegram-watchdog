@@ -11,9 +11,13 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   keeps updating): grid state and for how long, charge, load, remaining time, today's grid
   history next to the planned outage schedule, the next planned change and whether the battery
   lasts until then, plus 🔦 light and 🔌 12V on/off buttons for admins. Three looks, chosen per
-  chat in **⚙️ Settings → 📊 Status look**: Classic, iOS (like the station apps, with a
+  chat in **⚙️ Settings → 📊 Status look**: Classic, Modern (like the station apps, with a
   grid → battery → home picture) and Clock (a 24-hour dial with the schedule and the actual grid,
-  the time or the charge in LCD digits); Text for Telegram apps without widgets
+  the time or the charge in LCD digits); Text for Telegram apps without widgets. A new status
+  replaces the previous widget of the same look in the chat
+- **⚙️ Quick settings** widget (the gear button in the status widget): light, DC 12V, fast
+  charging and display tiles, the AC input limit as a slider, the auto light hours as a
+  two-handle range and the status look
 - **📅 Outage schedule** (Ukraine): Kyiv by street and house (YASNO), Kyiv region by group
   ([outage-data-ua](https://github.com/Baskerville42/outage-data-ua)); alerts 30 minutes
   before a planned outage, when tomorrow's schedule is published, when a schedule changes and
@@ -185,7 +189,8 @@ in the PC's `.env`, so the PC only switches power plans.
 | `menus.py` | settings, light, language and user menus; station commands |
 | `users.py` | users, roles and access mode |
 | `stats.py` | SQLite samples, outages and settings; summaries and charts |
-| `widget.py`, `widget_ios.py`, `widget_clock.py` | the 📊 Status widgets (classic, iOS, clock): HTML and data |
+| `widget.py`, `widget_ios.py`, `widget_clock.py` | the 📊 Status widgets (classic, modern, clock): HTML and data |
+| `widget_quick.py` | the ⚙️ Quick settings widget |
 | `schedule.py`, `schedmenu.py` | planned outage schedules (YASNO, outage-data-ua) and their menu |
 | `i18n.py`, `translations.py` | languages and number formatting |
 

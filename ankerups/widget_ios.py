@@ -87,7 +87,7 @@ $("gr").textContent=nx?(nx[1]=="1"?L.onat:L.offat)+" "+hm(nx[0]):"";
 $("nt").textContent=nx?dur(nx[0]-t):"—";$("u").textContent="⟳ "+hm(d.u||d.t);
 var k2=[d.f,d.p,Math.floor((d.m+(t-d.t)/60)/5),d.g,d.o>0,avg(),(d.b||[]).join(),d.i>(d.o||0)+20].join();if(k2!=key){key=k2;strip();flow()}}
 function ctl(){var d=D,k=[d.lm,d.dc].join();if(k==shown)return;shown=k;var c=$("ctl");c.innerHTML="";
-if(d.lm!=null)add(c,"light",IL,d.lm);if(d.dc!=null)add(c,"dc",ID,d.dc)}
+if(d.lm!=null)add(c,"light",IL,d.lm);if(d.dc!=null)add(c,"dc",ID,d.dc);add(c,"qs",SV+"<circle cx='12' cy='12' r='6.3'/><circle cx='12' cy='12' r='2.4'/><path stroke-width='3.2' stroke-linecap='butt' d='M12 2.4v3.4M12 18.2v3.4M2.4 12h3.4M18.2 12h3.4M5.2 5.2l2.4 2.4M16.4 16.4l2.4 2.4M5.2 18.8l2.4-2.4M16.4 7.6l2.4-2.4'/></svg>",0)}
 var SV="<svg viewBox='0 0 24 24' width='24' height='24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>",
 IL=SV+"<path d='M8 2.5h8v3.5l-2 3.2V21a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V9.2L8 6z'/><path d='M8 6h8'/><circle cx='12' cy='13' r='1.3' fill='currentColor'/></svg>",
 ID=SV+"<circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='4.5'/><circle cx='12' cy='12' r='1.4' fill='currentColor'/><path d='M12 3v2.5'/></svg>";
@@ -95,7 +95,7 @@ function add(c,a,t,on){var b=document.createElement("button");b.innerHTML=t;if(o
 b.addEventListener("click",function(){b.className=on?"":"a";W.request(a).then(function(){shown="";setTimeout(ctl,1500)},
 function(){b.textContent="⚠️";shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
 function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}tick();ctl()}
-load();W.onEvent("chatDataChanged",load);setInterval(tick,10000);W.ready()
+load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick()}setInterval(vf,10000);document.addEventListener("visibilitychange",vf);W.ready()
 </script>"""
 
 

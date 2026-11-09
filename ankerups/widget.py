@@ -73,7 +73,7 @@ nx+=need<left?" · ✓ ≈"+Math.round(avg*(1-need/left))+"%":" · ✗"}}
 $("nx").textContent=nx;$("u").textContent="⟳ "+dur(t-d.u)}
 var shown="",rkey="";
 function ctl(){var d=D,key=[d.lm,d.dc].join();if(key==shown)return;shown=key;var c=$("ctl");c.innerHTML="";
-if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n),d.lm);if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n),d.dc)}
+if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n),d.lm);if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n),d.dc);add(c,"qs","⚙️",0)}
 function add(c,a,t,on){var b=document.createElement("button");b.textContent=t;
 if(on){b.style.background="#2ea043";b.style.color="#fff"}b.addEventListener("click",function(){
 b.textContent="…";W.request(a).then(function(r){b.textContent=r.result||t;shown="";setTimeout(ctl,2500)},
@@ -83,7 +83,7 @@ $("tk").innerHTML="<svg viewBox='0 0 480 7' preserveAspectRatio='none' width='10
 "' stroke='currentColor' stroke-width='1' vector-effect='non-scaling-stroke'/></svg>"}
 ticks();
 function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}draw();ctl()}
-load();W.onEvent("chatDataChanged",load);setInterval(draw,10000);W.ready()
+load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)draw()}setInterval(vf,10000);document.addEventListener("visibilitychange",vf);W.ready()
 </script>"""
 
 

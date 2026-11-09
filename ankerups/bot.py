@@ -20,7 +20,7 @@ from .menus import TEXT_SETTINGS, Controller, Ctx, paint
 from .stats import Stats, chart_title
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
-from . import widget_clock, widget_ios
+from . import widget_clock, widget_ios, widget_quick
 from .widget import widget_html
 
 if TYPE_CHECKING:
@@ -38,6 +38,7 @@ class BotHandlers:
     controller: "Controller"
     stats: "Stats | None" = None
     widget: "Callable[[], tuple[str, str] | None] | None" = None  # (station name, widget data JSON)
+    quick: "Callable[[], str] | None" = None  # data of the ⚙️ Quick settings widget
     sched: "ScheduleMenu | None" = None
 
 
@@ -168,9 +169,9 @@ class Telegram:
                 try:
                     name, data = payload()
                     fallback, style = extra
-                    html = {"ios": widget_ios.widget_html, "clock": widget_clock.widget_html}.get(
-                        style, widget_html)(L, name)
-                    self._deliver_widget(chat, html, data, L, fallback)
+                    html = {"ios": widget_ios.widget_html, "clock": widget_clock.widget_html,
+                            "quick": widget_quick.widget_html}.get(style, widget_html)(L, name)
+                    self._deliver_widget(chat, html, data, L, fallback, style)
                 except Exception:
                     log.exception("Status widget failed")
                 continue
@@ -231,7 +232,8 @@ class Telegram:
         if self.enabled:
             self.queue.put(("widget", data, (fallback, style), chat, None, False))
 
-    def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render) -> None:
+    def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render,
+                        style: str = "widget") -> None:
         params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L),
                   "allow_queries": "true"}  # the light / 12V buttons inside the widget
         try:
@@ -243,44 +245,54 @@ class Telegram:
             return
         with self.widget_lock:
             widgets = self._widgets()
-            widgets[chat] = [message["message_id"], int(time.time())]  # the older one stops updating
+            old = widgets.get(f"{chat}|{style}")
+            widgets[f"{chat}|{style}"] = [message["message_id"], int(time.time())]
             self._save_widgets(widgets)
+        if old:  # one live widget of each look per chat: the client keeps every live one running
+            with contextlib.suppress(Exception):
+                self._call("deleteMessage", {"chat_id": chat, "message_id": old[0]})
 
     def _widgets(self) -> dict[str, list[int]]:
-        """Live status widgets: chat -> [message id, sent at]; kept in the DB across restarts."""
+        """Live status widgets: "chat|look" -> [message id, sent at]; kept in the DB across restarts."""
         try:
-            return json.loads(self.users.stats.meta("widgets") or "{}") if self.users else {}
+            saved = json.loads(self.users.stats.meta("widgets") or "{}") if self.users else {}
         except ValueError:
             return {}
+        return {(k if "|" in k else f"{k}|widget"): v for k, v in saved.items()}  # before 2.3.2: by chat
 
     def _save_widgets(self, widgets: dict) -> None:
         if self.users:
             self.users.stats.meta("widgets", json.dumps(widgets))
 
-    def update_widgets(self, data: str) -> None:
-        """Push new data to every live status widget."""
+    def update_widgets(self, data: str, quick: str | None = None) -> None:
+        """Push new data to every live widget: the status data, or the quick settings data."""
         with self.widget_lock:
             widgets = self._widgets()
         gone = []
-        for chat, (message_id, sent) in widgets.items():
+        for key, (message_id, sent) in widgets.items():
+            chat, _, look = key.partition("|")
+            payload = data if look != "quick" else (
+                widget_quick.with_look(quick, self.users.status_style(chat)) if quick and self.users else quick)
+            if payload is None:
+                continue
             if time.time() - sent > WIDGET_LIVE_FOR:
-                gone.append((chat, message_id))
+                gone.append((key, message_id))
                 continue
             try:
-                self._call("editMessageWidgetData", {"chat_id": chat, "message_id": message_id, "chat_data": data})
+                self._call("editMessageWidgetData", {"chat_id": chat, "message_id": message_id, "chat_data": payload})
             except urllib.error.HTTPError as exc:
                 text = exc.read().decode(errors="replace")
                 if "not modified" not in text:
                     log.info("Status widget in %s no longer updated: %s %s", chat, exc.code, text[:120])
-                    gone.append((chat, message_id))
+                    gone.append((key, message_id))
             except Exception as exc:  # network: try again next time
                 log.debug("Widget update failed: %s", exc)
         if gone:
             with self.widget_lock:
                 widgets = self._widgets()
-                for chat, message_id in gone:  # unless a newer widget was sent meanwhile
-                    if widgets.get(chat, [None])[0] == message_id:
-                        widgets.pop(chat)
+                for key, message_id in gone:  # unless a newer widget was sent meanwhile
+                    if widgets.get(key, [None])[0] == message_id:
+                        widgets.pop(key)
                 self._save_widgets(widgets)
 
     def _widget_loop(self, handlers: BotHandlers) -> None:
@@ -289,7 +301,7 @@ class Telegram:
             try:
                 info = handlers.widget() if handlers.widget else None
                 if info and self._widgets():
-                    self.update_widgets(info[1])
+                    self.update_widgets(info[1], handlers.quick() if handlers.quick else None)
             except Exception:
                 log.exception("Widget update loop failed")
 
@@ -539,10 +551,23 @@ class Telegram:
         result = ""
         if users.role(chat) in ACTIVE_ROLES:
             ctx = Ctx(users.lang(chat), users.is_admin(user), chat, user)
-            if not ctx.admin:
+            if action.startswith("look:") or action == "status":  # anyone: a status (in a new look)
+                if action != "status":
+                    users.set_status_style(chat, action[5:])
+                    result = ctx.L.t("saved")
+                style = users.status_style(chat)
+                if style != "text" and h.widget and h.widget():
+                    self.send_widget(chat, h.widget, h.status, style)
+                elif style == "text":
+                    self.reply(chat, h.status(ctx.L), title=True)
+            elif not ctx.admin:
                 result = ctx.L.t("only_admins")
-            elif action in ("light", "dc"):
-                result = h.controller.toggle(action, ctx)
+            elif action == "qs" and h.quick and h.widget and (info := h.widget()):  # open ⚙️ Quick settings
+                name = info[0]
+                self.send_widget(chat, lambda: (name, widget_quick.with_look(h.quick(), users.status_style(chat))),
+                                 h.status, "quick")
+            elif action:
+                result = h.controller.quick_action(action, ctx)
         log.info("Widget button %s by %s in %s: %s", action, user, chat, result)
         try:
             self._call("answerWidgetQuery", {"widget_query_id": wq.get("id"), "data": result})
@@ -552,7 +577,7 @@ class Telegram:
         except Exception as exc:
             log.warning("answerWidgetQuery failed: %s", exc)
         if h.widget and (info := h.widget()):
-            self.update_widgets(info[1])  # the new state right away, not in 15 s
+            self.update_widgets(info[1], h.quick() if h.quick else None)  # the new state right away
 
     def _user_action(self, rest: str, ctx: Ctx, msg: dict, h: BotHandlers) -> str:
         """u:<action>:<id>[:m] from a request message or the Users menu (":m")."""
