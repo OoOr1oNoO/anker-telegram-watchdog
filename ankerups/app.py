@@ -52,7 +52,7 @@ from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
 from .schedule import Day, Schedule, run_schedule, windows_text
 from .watchdog import LoadPeaks, PowerPlan, Watchdog, battery_state
-from .widget import widget_data
+from .widget import MAX_OUTPUT, widget_data
 
 
 async def find_device(api: AnkerSolixApi, wanted_sn: str | None) -> dict:
@@ -325,7 +325,7 @@ async def run(args: argparse.Namespace) -> None:
                                snapshot.get("remaining_h") if watchdog.on_battery else None,
                                fact, plan_today, plan_tomorrow, change, group,
                                datetime.now().hour * 60 + datetime.now().minute, emergency,
-                               *controller.widget_controls())
+                               *controller.widget_controls(), MAX_OUTPUT.get(device.get("device_pn")))
             return watchdog.name, data
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
