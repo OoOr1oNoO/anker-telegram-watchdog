@@ -80,7 +80,9 @@ class FakeBot:
 
 
 def texts(calls, method=None):
-    return [p.get("text") or p.get("caption") for m, p in calls if method in (None, m) and m != "answerCallbackQuery"]
+    # menu titles are padded with blank Braille characters to a common width
+    return [(p.get("text") or p.get("caption") or "").replace("\u2800", "") or None
+            for m, p in calls if method in (None, m) and m != "answerCallbackQuery"]
 
 
 def toast(calls):

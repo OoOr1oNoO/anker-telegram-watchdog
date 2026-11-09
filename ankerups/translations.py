@@ -236,7 +236,7 @@ TEXTS: dict[str, tuple[str, str, str, str, str, str]] = {
     "s_notif": ("🔔 Notifications", "🔔 Сповіщення", "🔔 Уведомления", "🔔 Powiadomienia",
                 "🔔 Benachrichtigungen", "🔔 Notificaciones"),
     "s_outputs": ("🔌 Outputs", "🔌 Виходи", "🔌 Выходы", "🔌 Wyjścia", "🔌 Ausgänge", "🔌 Salidas"),
-    "s_charging": ("🔋 Charging & display", "🔋 Заряджання й екран", "🔋 Зарядка и экран",
+    "s_charging": ("🔋 Charging & display", "🔋 Зарядка та дисплей", "🔋 Зарядка и экран",
                    "🔋 Ładowanie i ekran", "🔋 Laden & Display", "🔋 Carga y pantalla"),
     "s_users": ("👥 Users", "👥 Користувачі", "👥 Пользователи", "👥 Użytkownicy", "👥 Benutzer",
                 "👥 Usuarios"),

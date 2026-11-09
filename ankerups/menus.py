@@ -73,6 +73,8 @@ def window_text(L: Lang, window: str) -> str:
     return "–".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
 
 
+MENU_WIDTH = 34  # characters of the padded title line: about as wide as the English menus, not wider than a phone
+
 # inline button colours (Bot API "style"): dangerous actions red, the main way forward blue;
 # a chosen option ("•", "✓") green
 DANGER = ("a:ac:0!", "u:rm:", "u:no:", "g:off")
@@ -240,6 +242,15 @@ class Controller:
         return json.dumps({"inline_keyboard": paint([r for r in rows if r])})
 
     def render(self, menu: str, ctx: Ctx) -> tuple[str, str]:
+        """A menu: text and inline keyboard. Telegram desktop makes the keyboard as wide as the
+        message, and short texts (most languages but English) cut the labels of 4-5 button rows,
+        so the title line is padded with blank Braille characters to a common width."""
+        text, markup = self._render(menu, ctx)
+        first, _, rest = text.partition("\n")
+        first += "\u2800" * max(0, MENU_WIDTH - len(first))
+        return (first + ("\n" + rest if rest else "")), markup
+
+    def _render(self, menu: str, ctx: Ctx) -> tuple[str, str]:
         L, st = ctx.L, self.settings
         if menu == "light":
             # the light and the DC 12V socket (e.g. a USB lamp in a 12V adapter) in one panel

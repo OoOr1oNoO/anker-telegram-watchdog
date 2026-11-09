@@ -80,8 +80,9 @@ def test_language_menu_changes_chat_language(bot: FakeBot):
     assert bot.users.lang(bot.ADMIN).code == "es"
 
 
-def test_menu_titles_are_bold(bot: FakeBot):
+def test_menu_titles_are_bold_and_padded(bot: FakeBot):
     calls = bot.message(bot.ADMIN, "⚙️ Settings")
+    assert calls[0][1]["text"].split("\n")[0] == "⚙️ Settings" + "\u2800" * (34 - len("⚙️ Settings"))
     entities = json.loads(calls[0][1]["entities"])
     assert entities == [{"type": "bold", "offset": 0, "length": len("⚙️ Settings".encode("utf-16-le")) // 2}]
 

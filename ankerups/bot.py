@@ -600,5 +600,5 @@ class Telegram:
 def bold_first_line(text: str) -> str:
     """Telegram entities that make the first line bold; offsets count UTF-16 code units, and
     entities need no escaping, unlike parse_mode (names may contain < or &)."""
-    first = text.split("\n", 1)[0]
+    first = text.split("\n", 1)[0].rstrip("\u2800")  # not the blank padding of menu titles
     return json.dumps([{"type": "bold", "offset": 0, "length": len(first.encode("utf-16-le")) // 2}])

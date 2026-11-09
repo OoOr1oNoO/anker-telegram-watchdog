@@ -14,12 +14,12 @@ TEMPLATE = """<style>
 body{margin:0;background:linear-gradient(160deg,#252a33,#111317);color:#f2f2f7}
 .w{padding:14px 14px 12px}.r{display:flex;justify-content:space-between;align-items:center}
 .nm{font-weight:700;font-size:16px}.hn{font-size:11px;color:#8e8e93}
-.ch{font-size:11px;font-weight:700;letter-spacing:.5px;padding:3px 9px;border-radius:10px;color:#111}
+.ch{font-size:11px;font-weight:700;padding:3px 9px;border-radius:10px;color:#111}
 .m{display:flex;align-items:center;gap:6px;margin-top:6px}
 #dl{flex:0 0 176px;height:176px}.c{flex:1;display:flex;flex-direction:column;gap:9px}
-.k{font-size:10px;font-weight:700;letter-spacing:.7px;color:#8e8e93}
+.k{font-size:10px;font-weight:700;letter-spacing:1px;color:#8e8e93}
 .io{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:700}.io svg{flex:0 0 22px}
-.big{font-size:24px;font-weight:800;line-height:1.1}.sm{font-size:12px;color:#8e8e93}
+.big{font-size:24px;font-weight:800}.sm{font-size:12px;color:#8e8e93}
 .bt{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:#c7c7cc}
 .bt span{width:74px}.bt b{width:38px;text-align:right;font-weight:600;color:#f2f2f7}
 .bar{flex:1;height:8px;border-radius:4px;background:#2c2f36}.bar i{display:block;height:8px;border-radius:4px}
@@ -40,33 +40,35 @@ function now(){return Date.now()/1000}
 function hm(t){var d=new Date(t*1000);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}
 function avg(){var b=D.b||[];return b.length?Math.round(b.reduce(function(a,x){return a+x},0)/b.length):null}
 function pt(r,a){a=(a-90)*Math.PI/180;return(100+r*Math.cos(a)).toFixed(1)+" "+(100+r*Math.sin(a)).toFixed(1)}
-function seg(r,i,col){return "<path d='M"+pt(r,i*7.5+.6)+"A"+r+" "+r+" 0 0 1 "+pt(r,i*7.5+6.9)+"' stroke='"+col+"'/>"}
+function arc(r,i,j,col){var a0=i*7.5+.6,a1=j*7.5-.6;
+return "<path d='M"+pt(r,a0)+"A"+r+" "+r+" 0 "+(a1-a0>180?1:0)+" 1 "+pt(r,a1)+"' stroke='"+col+"' pathLength='"+Math.round((a1-a0)*10)+"' stroke-dasharray='63 12'/>"}
+function ring(r,col){var h="",i=0;while(i<48){var j=i+1,c=col(i);while(j<48&&col(j)==c&&j-i<24)j++;h+=arc(r,i,j,c);i=j}return h}
 var SG={a:[3,0,12,3.5],b:[14.5,3,3.5,12],c:[14.5,18,3.5,12],d:[3,29.5,12,3.5],e:[0,18,3.5,12],f:[0,3,3.5,12],g:[3,14.75,12,3.5]},
 DG=["abcdef","bc","abdeg","abcdg","bcfg","acdfg","acdefg","abcf","abcdefg","abcdfg"];
-function lcd(txt,x,y,c){var h="";txt.split("").forEach(function(ch,k){var on=DG[+ch]||"";
-for(var s in SG){var q=SG[s];h+="<rect x='"+(x+k*22+q[0])+"' y='"+(y+q[1])+"' width='"+q[2]+"' height='"+q[3]+"' rx='1.5' fill='"+(on.indexOf(s)>=0?c:"#262a31")+"'/>"}});return h}
+function lcd(txt,x,y,c){var lit="",dim="";txt.split("").forEach(function(ch,k){var on=DG[+ch]||"";
+for(var s in SG){var q=SG[s],r="M"+(x+k*22+q[0])+" "+(y+q[1])+"h"+q[2]+"v"+q[3]+"h"+(-q[2])+"z";if(on.indexOf(s)>=0)lit+=r;else dim+=r}});
+return "<path d='"+dim+"' fill='#262a31'/><path d='"+lit+"' fill='"+c+"'/>"}
 function T(x,y,size,col,txt,ex){return "<text x='"+x+"' y='"+y+"' text-anchor='middle' font-size='"+size+"' fill='"+col+"'"+(ex||"")+">"+txt+"</text>"}
 function dial(){var d=D,t=now(),mn=d.m+(t-d.t)/60,cur=Math.floor(mn/30),f=d.f||"",p=d.p||"",s="",a=mn/4,g=d.g,
 c=CC=g===0?"#ff9f0a":"#34c759",av=avg(),tk="",n=av==null?"":String(Math.min(av,100)),i;
 var P={"1":"#2d6a40","0":"#6b2b29","?":"#6e5b22"},F={"1":"#34c759","0":"#ff453a","p":"#ff9f0a"};
-for(i=0;i<48;i++){s+=seg(80,i,P[p[i]]||"#2a2e36");s+=seg(68,i,i<=cur&&F[f[i]]||"#2a2e36")}
-for(i=0;i<24;i++)tk+="<path d='M"+pt(87,i*15)+"L"+pt(i%3?90:94,i*15)+"'/>";
+s=ring(80,function(i){return P[p[i]]||"#2a2e36"})+ring(68,function(i){return i<=cur&&F[f[i]]||"#2a2e36"});
+for(i=0;i<24;i++)tk+="M"+pt(87,i*15)+"L"+pt(i%3?90:94,i*15);
 var lb=["0","6","12","18"].map(function(x,j){var q=pt(102,j*90).split(" ");return T(q[0],+q[1]+3,"9","#8e8e93",x)}).join("");
 var hp=pt(91,a).split(" "),dt=new Date(),hh=String(dt.getHours()).padStart(2,"0"),mm=String(dt.getMinutes()).padStart(2,"0"),
 ctr=pm?lcd(n,100-(n.length*22-4)/2-5,74,c)+"<text x='"+(100+(n.length*22-4)/2-1)+"' y='106' font-size='11' font-weight='700' fill='"+c+"'>%</text>"
 :lcd(hh,53,74,c)+"<g id='cl' fill='"+c+"'><rect x='98' y='82' width='4' height='4' rx='1'/><rect x='98' y='96' width='4' height='4' rx='1'/></g>"+lcd(mm,109,74,c);
-$("dl").innerHTML="<svg viewBox='-12 -12 224 224' width='176' height='176'><defs><radialGradient id='gl'><stop offset='0' stop-color='"+
-(g===0?"#3d2a10":"#14331f")+"'/><stop offset='1' stop-color='#121519'/></radialGradient></defs>"+
+$("dl").innerHTML="<svg viewBox='-12 -12 224 224' width='176' height='176'>"+
 "<g fill='none' stroke-width='8' stroke-linecap='round'>"+s+"</g>"+
-"<g stroke='#636366' stroke-width='1.4' stroke-linecap='round'>"+tk+"</g>"+lb+
-"<circle cx='100' cy='100' r='56' fill='url(#gl)' stroke='#22262d'/>"+
+"<path d='"+tk+"' stroke='#636366' stroke-width='1.4' stroke-linecap='round'/>"+lb+
+"<circle cx='100' cy='100' r='56' fill='"+(g===0?"#231c12":"#121f17")+"' stroke='#22262d'/>"+
 "<path d='M"+pt(60,a)+"L"+pt(91,a)+"' stroke='#f2f2f7' stroke-width='2.4' stroke-linecap='round'/>"+
 "<circle cx='"+hp[0]+"' cy='"+hp[1]+"' r='3.5' fill='#f2f2f7'/>"+
 ctr+
-T(100,124,"8.5",c,g==null?"":(g?L.on:L.off).toUpperCase()," font-weight='700' letter-spacing='0.6'")+
-T(100,136,"9","#8e8e93","","  id='sn'")+"</svg>"}
+T(100,124,"8.5",c,g==null?"":(g?L.on:L.off).toUpperCase()," font-weight='700'")+
+T(100,136,"9","#8e8e93",""," id='sn'")+"</svg>"}
 function bats(){var b=D.b||[],h="";b.forEach(function(x,i){var col=x<25?"#ff453a":x<50?"#ff9f0a":"#34c759";
-h+="<div class=bt><span>"+(i?L.e+(b.length>2?" "+i:""):L.m)+"</span><div class=bar><i style='width:"+x+"%;background:linear-gradient(90deg,"+col+",#e9ffe9)'></i></div><b>"+x+"%</b></div>"});
+h+="<div class='bt'><span>"+(i?L.e+(b.length>2?" "+i:""):L.m)+"</span><div class='bar'><i style='width:"+x+"%;background:linear-gradient(90deg,"+col+",#e9ffe9)'></i></div><b>"+x+"%</b></div>"});
 $("bt").innerHTML=h}
 function tick(){var d=D,t=now(),g=d.g,a=avg();if(!d.t)return;
 var k=[d.f,d.p,Math.floor((d.m+(t-d.t)/60)/30),g,Math.floor((t-d.t)/600),a,(d.b||[]).join(),pm,pm||new Date().getMinutes()].join();if(k!=key){key=k;dial();bats()}

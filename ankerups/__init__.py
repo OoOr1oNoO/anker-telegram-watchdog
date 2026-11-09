@@ -1,3 +1,3 @@
 """Anker SOLIX power station watchdog with a Telegram bot."""
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
