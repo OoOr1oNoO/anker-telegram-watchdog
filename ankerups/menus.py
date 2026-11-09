@@ -11,7 +11,7 @@ from .common import as_int, log
 from .i18n import Lang, lang
 from .stats import Settings
 from .translations import LANG_NAMES, LANGS
-from .users import ACCESS_MODES, ACTIVE_ROLES, Users
+from .users import ACCESS_MODES, ACTIVE_ROLES, STATUS_STYLES, Users
 
 
 @dataclass
@@ -71,6 +71,25 @@ def window_text(L: Lang, window: str) -> str:
     if not span:
         return L.t("off")
     return "–".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
+
+
+# inline button colours (Bot API "style"): dangerous actions red, the main way forward blue;
+# a chosen option ("•", "✓") green
+DANGER = ("a:ac:0!", "u:rm:", "u:no:", "g:off")
+PRIMARY = ("u:ok:", "u:add")
+
+
+def paint(rows: list[list[dict]]) -> list[list[dict]]:
+    for row in rows:
+        for button in row:
+            data = button.get("callback_data", "")
+            if data.startswith(DANGER):
+                button["style"] = "danger"
+            elif data.startswith(PRIMARY):
+                button["style"] = "primary"
+            elif button["text"].startswith(("•", "✓")):
+                button["style"] = "success"
+    return rows
 
 
 # settings typed in by an admin after ✏️: key -> (prompt, "could not read it", menu to show)
@@ -218,7 +237,7 @@ class Controller:
     def _markup(L: Lang, rows: list[list[dict]], back: str | None = "m:root") -> str:
         if back:
             rows = [*rows, [{"text": L.t("back"), "callback_data": back}]]
-        return json.dumps({"inline_keyboard": [r for r in rows if r]})
+        return json.dumps({"inline_keyboard": paint([r for r in rows if r])})
 
     def render(self, menu: str, ctx: Ctx) -> tuple[str, str]:
         L, st = ctx.L, self.settings
@@ -306,6 +325,13 @@ class Controller:
                         for code in LANGS]
             return (L.t("lang_title", v=LANG_NAMES[L.code]),
                     self._markup(L, [buttons[:1], buttons[1:4], buttons[4:]]))
+        if menu == "style" and self.users:
+            current = self.users.status_style(ctx.chat)
+            return L.t("st_title", v=L.t(f"st_{current}")), self._markup(L, [
+                [{"text": ("• " if s == current else "") + L.t(f"st_{s}"), "callback_data": f"v:{s}"}
+                 for s in STATUS_STYLES[:2]],
+                [{"text": ("• " if s == current else "") + L.t(f"st_{s}"), "callback_data": f"v:{s}"}
+                 for s in STATUS_STYLES[2:]]])
         if menu == "sched" and self.sched:
             return self.sched.render(L, ctx.admin)
         if menu == "users" and ctx.admin and self.users:
@@ -321,8 +347,8 @@ class Controller:
         if ctx.admin and self.users:
             rows[2].append({"text": L.t("s_users"), "callback_data": "m:users"})
         if self.widgets and self.users:
-            mode = L.t("st_text" if self.users.text_status(ctx.chat) else "st_widget")
-            rows.append([{"text": L.t("st_mode", v=mode), "callback_data": "v:toggle"}])
+            mode = L.t(f"st_{self.users.status_style(ctx.chat)}")
+            rows.append([{"text": L.t("st_mode", v=mode), "callback_data": "m:style"}])
         return L.t("s_title"), self._markup(L, rows, back=None)
 
     @staticmethod

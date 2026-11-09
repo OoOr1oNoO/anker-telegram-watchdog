@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-from ankerups import widget
+from ankerups import widget, widget_clock, widget_ios
 from ankerups.i18n import lang
 from ankerups.schedmenu import ScheduleMenu
 from ankerups.translations import LANGS
@@ -17,8 +17,9 @@ DATA = widget.widget_data(1794139367, 1794139364, False, 1794133607, {"main": 10
 
 
 @pytest.mark.parametrize("code", LANGS)
-def test_html_fits_telegram_limits(code):
-    html = widget.widget_html(lang(code), "Anker <SOLIX> C1000X")
+@pytest.mark.parametrize("module", [widget, widget_ios, widget_clock])
+def test_html_fits_telegram_limits(code, module):
+    html = module.widget_html(lang(code), "Anker <SOLIX> C1000X")
     assert len(html.encode()) <= 32768 and widget.compressed_size(html) <= 3800
     assert "&lt;SOLIX&gt;" in html and "__" not in html
 
@@ -67,13 +68,26 @@ def test_refused_widget_falls_back_to_text(wbot: FakeBot):
     assert texts(wbot.message(wbot.ADMIN, "📊 Status")) == ["📊 Station\nen"]
 
 
-def test_text_mode_per_chat(wbot: FakeBot):
+def test_status_style_per_chat(wbot: FakeBot):
     calls = wbot.message(wbot.ADMIN, "⚙️ Settings")
-    assert buttons(calls[0][1])[-1] == ["📊 Status: widget"]
-    calls = wbot.press(wbot.ADMIN, "v:toggle")
-    assert toast(calls) == "Saved" and buttons(calls[0][1])[-1] == ["📊 Status: text"]
+    assert buttons(calls[0][1])[-1] == ["📊 Status look: Classic"]
+    calls = wbot.press(wbot.ADMIN, "m:style")
+    assert buttons(calls[0][1])[:2] == [["• Classic", "iOS"], ["Clock", "Text"]]
+    calls = wbot.press(wbot.ADMIN, "v:ios")
+    assert toast(calls) == "Saved" and buttons(calls[0][1])[0] == ["Classic", "• iOS"]
+    assert "CHARGE AT POWER-ON" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]
+    wbot.press(wbot.ADMIN, "v:clock")
+    assert "IN · OUT" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]
+    wbot.press(wbot.ADMIN, "v:text")
     assert texts(wbot.message(wbot.ADMIN, "📊 Status")) == ["📊 Station\nen"]
     assert wbot.message(wbot.GROUP, "/status", kind="group")[0][0] == "sendWidget"  # other chats keep it
+    wbot.press(wbot.ADMIN, "v:bogus")
+    assert wbot.users.status_style(wbot.ADMIN) == "text"
+
+
+def test_old_text_mode_setting_is_kept(wbot: FakeBot):
+    wbot.users.stats.meta(f"status_text:{wbot.ADMIN}", "1")
+    assert wbot.users.status_style(wbot.ADMIN) == "text"
 
 
 def test_schedule_set_up_from_the_bot(wbot: FakeBot, schedule, fake):  # noqa: F811

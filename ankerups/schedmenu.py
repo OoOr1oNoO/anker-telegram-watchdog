@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from .common import log
+from .menus import paint
 from .i18n import Lang
 from .schedule import Day, Schedule, fetch_json, find_group, oblast_groups, search_houses, search_streets
 from .schedule import OBLAST_URL, windows_text
@@ -57,7 +58,7 @@ def alert_note(schedule: Schedule | None, L: Lang, kind: str, ts: float) -> str:
 
 
 def markup(rows: list[list[dict]]) -> str:
-    return json.dumps({"inline_keyboard": [r for r in rows if r]})
+    return json.dumps({"inline_keyboard": paint([r for r in rows if r])})
 
 
 class ScheduleMenu:

@@ -132,7 +132,7 @@ def charge_hint(stats: Stats, snapshot: dict, limit: int | None, limits: list[in
     if limit is not None and limit >= best:
         return text, None  # the limit allows it: the station draws what it can
     return text, (lambda L: json.dumps({"inline_keyboard": [[
-        {"text": L.t("ch_button", w=best), "callback_data": f"a:limit:{best}@alert"}]]}))
+        {"text": L.t("ch_button", w=best), "callback_data": f"a:limit:{best}@alert", "style": "primary"}]]}))
 
 
 def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,

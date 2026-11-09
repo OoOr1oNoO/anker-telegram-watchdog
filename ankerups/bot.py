@@ -16,10 +16,11 @@ from typing import TYPE_CHECKING
 
 from .common import log
 from .i18n import Lang, Render, lang
-from .menus import TEXT_SETTINGS, Controller, Ctx
+from .menus import TEXT_SETTINGS, Controller, Ctx, paint
 from .stats import Stats, chart_title
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
+from . import widget_clock, widget_ios
 from .widget import widget_html
 
 if TYPE_CHECKING:
@@ -166,7 +167,10 @@ class Telegram:
             if kind == "widget":
                 try:
                     name, data = payload()
-                    self._deliver_widget(chat, widget_html(L, name), data, L, extra)
+                    fallback, style = extra
+                    html = {"ios": widget_ios.widget_html, "clock": widget_clock.widget_html}.get(
+                        style, widget_html)(L, name)
+                    self._deliver_widget(chat, html, data, L, fallback)
                 except Exception:
                     log.exception("Status widget failed")
                 continue
@@ -220,10 +224,12 @@ class Telegram:
                         exc.read().decode(errors="replace")[:200])
             self._deliver("text", chat, (fallback, markup, True))
 
-    def send_widget(self, chat: str, data: Callable[[], tuple[str, str]], fallback: Render) -> None:
-        """📊 Status as a live widget; fallback is the text status if the widget is refused."""
+    def send_widget(self, chat: str, data: Callable[[], tuple[str, str]], fallback: Render,
+                    style: str = "widget") -> None:
+        """📊 Status as a live widget ("widget" or the app-like "ios"); fallback is the text
+        status if the widget is refused."""
         if self.enabled:
-            self.queue.put(("widget", data, fallback, chat, None, False))
+            self.queue.put(("widget", data, (fallback, style), chat, None, False))
 
     def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render) -> None:
         params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L),
@@ -424,8 +430,9 @@ class Telegram:
             if h.stats:
                 self.reply(chat, L.t("stats_title"), stats_menu(L), title=True)
         elif action == "status":
-            if h.widget and h.widget() and not users.text_status(chat):
-                self.send_widget(chat, h.widget, h.status)
+            style = users.status_style(chat)
+            if h.widget and h.widget() and style != "text":
+                self.send_widget(chat, h.widget, h.status, style)
             else:
                 self.reply(chat, h.status(L), title=True)
 
@@ -457,9 +464,9 @@ class Telegram:
             users.upsert(chat, name=name, role="pending", lang_auto=L.code)
             self.reply(chat, L.t("rq_sent"), REMOVE_KEYBOARD, L.code)
             for admin in users.admins():
-                self.reply(admin, lambda L: L.t("rq_admin", who=who), lambda L: json.dumps({"inline_keyboard": [[
+                self.reply(admin, lambda L: L.t("rq_admin", who=who), lambda L: json.dumps({"inline_keyboard": paint([[
                     {"text": L.t("rq_allow"), "callback_data": f"u:ok:{chat}"},
-                    {"text": L.t("rq_deny"), "callback_data": f"u:no:{chat}"}]]}))
+                    {"text": L.t("rq_deny"), "callback_data": f"u:no:{chat}"}]])}))
         else:
             self.reply(chat, L.t("closed_reply", id=chat), REMOVE_KEYBOARD, L.code)
 
@@ -515,9 +522,9 @@ class Telegram:
                     self._edit(msg, view)
                 if ask:
                     self._ask(chat, user, ask, h)
-            elif kind == "v" and h.widget:  # 📊 Status: widget / text, per chat
-                users.set_text_status(chat, not users.text_status(chat))
-                self._edit(msg, h.controller.render("root", ctx))
+            elif kind == "v" and h.widget:  # the look of 📊 Status, per chat
+                users.set_status_style(chat, rest)
+                self._edit(msg, h.controller.render("style", ctx))
                 toast = ctx.L.t("saved")
         with contextlib.suppress(Exception):
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})

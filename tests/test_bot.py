@@ -3,6 +3,8 @@
 import json
 from types import SimpleNamespace
 
+from ankerups.i18n import lang
+from ankerups.menus import Ctx
 from conftest import FakeBot, buttons, texts, toast
 
 
@@ -126,3 +128,11 @@ def test_light_panel_dc_only_and_stays_open(bot: FakeBot):
     assert sent == [{"enabled": True}]
     assert toast(calls) == "On ✓"
     assert texts(calls)[-1].splitlines()[0] == "🔌 12V: On"  # the panel is shown again, not Outputs
+
+
+def test_inline_buttons_are_colored(bot: FakeBot):
+    markup = json.loads(bot.controller.render("notif", Ctx(lang("en"), True, bot.ADMIN, bot.ADMIN))[1])
+    styles = {b["text"]: b.get("style") for row in markup["inline_keyboard"] for b in row}
+    assert styles["✓75%"] == "success" and styles["« Back"] is None
+    markup = json.loads(bot.controller.render("acoff", Ctx(lang("en"), True, bot.ADMIN, bot.ADMIN))[1])
+    assert markup["inline_keyboard"][0][0]["style"] == "danger"
