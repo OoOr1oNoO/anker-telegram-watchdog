@@ -30,17 +30,19 @@ body{margin:10px 12px}
 .l span{width:54px;font-size:11px;color:var(--tg-theme-hint-color)}
 .x{display:flex;gap:1px;flex:1;height:11px}
 .x i{flex:1;border-radius:1px;background:var(--tg-theme-section-separator-color)}
-.x .on{background:#2ea043}.x .off{background:#da3633}.x .may{background:#d29922}
+.x .on{background:#2ea043}.x .off{background:#da3633}.x .may{background:#e3b341}.x .part{background:#f0883e}
 .x .now{outline:1.5px solid var(--tg-theme-text-color)}
-.h{display:flex;justify-content:space-between;margin-left:60px;font-size:10px;color:var(--tg-theme-hint-color)}
-.h i{font-style:normal}
+.tk{display:flex;gap:1px;margin:1px 0 0 60px;height:7px;align-items:flex-start}
+.tk i{flex:1;border-left:1px solid var(--tg-theme-hint-color)}
+.h{display:flex;margin-left:57px;font-size:10px;color:var(--tg-theme-hint-color)}
+.h i{flex:1;font-style:normal;display:flex;justify-content:space-between}
 .k2{display:flex;gap:6px;margin-top:6px}.k2 button{font-size:13px;padding:5px 10px}
 </style>
 <div class=r><span class=t>__NAME__</span><span class=p id=p></span></div>
 <div class=g><div class=c><div class=k>🔋 __BAT__</div><div class=v id=b></div><div class=b><i id=bb></i></div><div class=s id=bs></div></div>
 <div class=c><div class=k>🏠 __LOAD__</div><div class=v id=o></div><div class=s id=os></div></div></div>
 <div class=c style="margin-top:6px"><div class=r><span class=k id=gr></span><span class=s id=nx></span></div>
-<div id=rows></div><div class=h><i>0</i><i>6</i><i>12</i><i>18</i><i>24</i></div></div>
+<div id=rows></div><div class=tk id=tk></div><div class=h><i>0</i><i>6</i><i>12</i><i>18<b style="font-weight:400;margin-right:-3px">24</b></i></div></div>
 <div class=k2 id=ctl></div>
 <div class=s id=u style="margin-top:3px"></div>
 <script>
@@ -50,7 +52,7 @@ if(m<60)return m+u[2];if(h<24)return h+u[1]+" "+String(m%60).padStart(2,"0")+u[2
 function now(){return Date.now()/1000}
 function hm(t){var d=new Date(t*1000);return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")}
 function strip(name,s,cur){var h="<div class=l><span>"+name+"</span><div class=x>";
-for(var i=0;i<48;i++){var c=s[i],k=c=="1"?"on":c=="0"?"off":c=="?"?"may":"";h+="<i class='"+k+(i==cur?" now":"")+"'></i>"}
+for(var i=0;i<48;i++){var c=s[i],k=c=="1"?"on":c=="0"?"off":c=="?"?"may":c=="p"?"part":"";h+="<i class='"+k+(i==cur?" now":"")+"'></i>"}
 return h+"</div></div>"}
 function draw(){var d=D,t=now();if(!d.t)return;
 var g=d.g,p=$("p");p.textContent=(g==null?"?":g?L.on:L.off)+(d.c?" · "+dur(t-d.c):"");
@@ -70,10 +72,15 @@ nx+=need<left?" · ✓ ≈"+Math.round(avg*(1-need/left))+"%":" · ✗"}}
 $("nx").textContent=nx;$("u").textContent="⟳ "+dur(t-d.u)}
 var shown="";
 function ctl(){var d=D,key=[d.lm,d.dc].join();if(key==shown)return;shown=key;var c=$("ctl");c.innerHTML="";
-if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n));if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n))}
-function add(c,a,t){var b=document.createElement("button");b.textContent=t;b.addEventListener("click",function(){
+if(d.lm!=null)add(c,"light","🔦 "+(d.lm?L.y:L.n),d.lm);if(d.dc!=null)add(c,"dc","🔌 12V "+(d.dc?L.y:L.n),d.dc)}
+function add(c,a,t,on){var b=document.createElement("button");b.textContent=t;
+if(on){b.style.background="#2ea043";b.style.color="#fff"}b.addEventListener("click",function(){
 b.textContent="…";W.request(a).then(function(r){b.textContent=r.result||t;shown="";setTimeout(ctl,2500)},
 function(e){b.textContent="⚠️ "+(e.code||e);shown="";setTimeout(ctl,2500)})});c.appendChild(b)}
+function ticks(){var t="";for(var i=0;i<48;i++){var h=i%12==0?7:i%6==0?5:i%2==0?3:0;
+t+="<i style='height:"+(h||7)+"px"+(h?"":";border-left:0")+(i==47?";border-right:1px solid var(--tg-theme-hint-color)":"")+"'></i>"}
+$("tk").innerHTML=t}
+ticks();
 function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}draw();ctl()}
 load();W.onEvent("chatDataChanged",load);setInterval(draw,10000);W.ready()
 </script>"""

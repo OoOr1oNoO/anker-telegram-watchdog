@@ -15,6 +15,26 @@ def chart_title(L: Lang, hours: int) -> str:
     return L.t("chart_hours", hours=hours) if hours < 48 else L.t("chart_days", days=hours // 24)
 
 
+def merge_slot(slot: str, grid: bool) -> str:
+    """Add a minute with or without grid to a half-hour cell of grid_slots()."""
+    state = "1" if grid else "0"
+    return state if slot in ("-", state) else "p"
+
+
+DEFAULT_TARIFF = 4.32  # UAH per kWh, Ukrainian households
+
+
+def esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def table(rows: list[list[str]], compact: bool = False) -> str:
+    """A rich-message table; the first row is the header."""
+    head = "".join(f"<th><b>{esc(c)}</b></th>" for c in rows[0])
+    body = "".join("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in r) + "</tr>" for r in rows[1:])
+    return f"<table bordered striped{' compact' if compact else ''}><tr>{head}</tr>{body}</table>"
+
+
 class Stats:
     """Minute samples and outages in SQLite next to the script, for charts and summaries.
 
@@ -75,14 +95,27 @@ class Stats:
         self._exec("UPDATE outages SET end = ?, soc_end = ? WHERE end IS NULL", (int(end), soc))
 
     def grid_slots(self, midnight: float, now: float) -> str:
-        """Half hours from midnight to now: "1" grid all the time, "0" an outage in it, "-" no data."""
+        """Half hours from midnight to now: "1" grid all the time, "0" no grid all the time, "p" part
+        of it (an outage started or ended in it), "-" no data."""
         rows = self._exec("SELECT ts, grid FROM samples WHERE ts >= ? AND ts < ?", (int(midnight), int(now)))
         slots = ["-"] * min(48, int((now - midnight) // 1800) + 1)
         for ts, grid in rows:
             i = int((ts - midnight) // 1800)
             if 0 <= i < len(slots):
-                slots[i] = "0" if not grid or slots[i] == "0" else "1"
+                slots[i] = merge_slot(slots[i], bool(grid))
         return "".join(slots)
+
+    def wh_per_percent(self, now: float | None = None) -> float | None:
+        """Battery energy per 1 % of the average charge, learned from the last 3 h of charging
+        from the grid (net input W x minutes / change of %); None without enough data."""
+        now = time.time() if now is None else now
+        rows = self._exec("SELECT ac_in, out, soc FROM samples WHERE ts >= ? AND grid = 1 AND ac_in > out + 20 "
+                          "ORDER BY ts", (int(now - 3 * 3600),))
+        if len(rows) < 10:
+            return None
+        wh = sum(a - o for a, o, _ in rows) / 60
+        gained = rows[-1][2] - rows[0][2]
+        return wh / gained if gained >= 3 and wh > 0 else None
 
     def energy_kwh(self, since: float, until: float | None = None) -> tuple[float, float]:
         rows = self._exec("SELECT COALESCE(SUM(ac_in), 0), COALESCE(SUM(out), 0) FROM samples "
@@ -139,6 +172,60 @@ class Stats:
             lines += ["", L.t("mo_since", date=datetime.fromtimestamp(first).strftime("%d.%m.%Y"))]
         return "\n".join(lines)
 
+    # rich messages (Bot API tables); the *_text versions above are the fallback
+    def energy_html(self, L: Lang, tariff: float) -> str:
+        now = datetime.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        periods = [("p_today", today), ("p_7d", now - timedelta(days=7)),
+                   ("p_30d", now - timedelta(days=30)), ("p_all", datetime.fromtimestamp(0))]
+        rows = [[L.t("t_period"), L.t("t_in"), L.t("t_out"), L.t("t_cost")]]
+        for label, since in periods:
+            e_in, e_out = self.energy_kwh(since.timestamp())
+            rows.append([L.t(label), f"{e_in:.2f}", f"{e_out:.2f}", L.money(e_in * tariff)])
+        return (f"<h3>{esc(L.t('en_title_short'))}</h3>" + table(rows)
+                + f"<footer>{esc(L.t('t_tariff_note', v=L.money(tariff)))}</footer>")
+
+    def outages_html(self, L: Lang, days: int = 30) -> str:
+        """One row per day (by the start of the outage): time without grid, the outages, the lowest
+        charge they ended with."""
+        now = time.time()
+        found = self.outages_between(now - days * 86400, now)
+        if not found:
+            return f"<p>{esc(L.t('out_none', days=days))}</p>"
+        total = sum(end - start for start, end, *_ in found)
+        by_day: dict[str, list] = {}
+        for outage in found:
+            by_day.setdefault(datetime.fromtimestamp(outage[0]).strftime("%d.%m"), []).append(outage)
+        rows = [[L.t("t_day"), L.t("t_off"), L.t("t_when"), L.t("t_min")]]
+        for day, outages in list(by_day.items())[::-1]:
+            spans = ", ".join(f"{datetime.fromtimestamp(s):%H:%M}–" + (f"{datetime.fromtimestamp(e):%H:%M}"
+                                                                         if soc_end is not None else "…")
+                              for s, e, _, soc_end in outages)
+            ends = [soc_end for *_, soc_end in outages if soc_end is not None]
+            rows.append([day, L.dur(sum(e - s for s, e, *_ in outages), True), spans,
+                         f"{min(ends)}%" if ends else "—"])
+        return (f"<h3>{esc(L.t('out_title', days=days, n=len(found), dur=L.dur(total, True)))}</h3>"
+                + table(rows, compact=True))
+
+    def months_html(self, L: Lang, tariff: float, count: int = 3) -> str:
+        now = datetime.now()
+        starts = [now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)]
+        while len(starts) < count:
+            starts.append((starts[-1] - timedelta(days=1)).replace(day=1))
+        first = self._exec("SELECT MIN(ts) FROM samples")[0][0]
+        rows = [[L.t("t_month"), L.t("t_outages"), L.t("t_off"), L.t("t_in"), L.t("t_cost")]]
+        for i, start in enumerate(starts):
+            s, e = start.timestamp(), (now if i == 0 else starts[i - 1]).timestamp()
+            if first and e <= first:
+                break
+            spans = [min(b, e) - max(a, s) for a, b, *_ in self.outages_between(s, e)]
+            e_in, _ = self.energy_kwh(s, e)
+            rows.append([f"{L.month(start.month)} {start.year}", str(len(spans)), L.dur(sum(spans), True),
+                         f"{e_in:.2f}", L.money(e_in * tariff)])
+        footer = (f"<footer>{esc(L.t('mo_since', date=datetime.fromtimestamp(first).strftime('%d.%m.%Y')))}</footer>"
+                  if first and first > starts[-1].timestamp() else "")
+        return f"<h3>{esc(L.t('mo_title'))}</h3>" + table(rows) + footer
+
     def summary_text(self, end: datetime, L: Lang, hours: int = 24) -> str:
         start = end - timedelta(hours=hours)
         rows = self._exec("SELECT AVG(out), MAX(out), SUM(ac_in), SUM(out) FROM samples "
@@ -180,8 +267,20 @@ class Stats:
         for s, e, *_ in outages:
             ax.axvspan(datetime.fromtimestamp(max(s, start)), datetime.fromtimestamp(min(e, end)),
                        color="#868e96", alpha=0.25, lw=0)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M" if hours <= 48 else "%d.%m"))
-        ax.grid(alpha=0.3)
+        # like a clock face: long labelled ticks every few hours (days), short ones in between
+        if hours <= 48:
+            ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3 if hours <= 24 else 6)))
+            ax.xaxis.set_minor_locator(mdates.HourLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        else:
+            ax.xaxis.set_major_locator(mdates.DayLocator())
+            ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18]))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+        ax.tick_params(axis="x", which="major", length=8, width=1.2)
+        ax.tick_params(axis="x", which="minor", length=3, width=0.8)
+        ax.grid(axis="x", which="major", alpha=0.35)
+        ax.grid(axis="x", which="minor", alpha=0.12)
+        ax.grid(axis="y", alpha=0.3)
         handles = ax.get_legend_handles_labels()[0] + soc_ax.get_legend_handles_labels()[0]
         ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=3,
                   fontsize=8, frameon=False)
@@ -219,6 +318,14 @@ class Settings:
     @property
     def summary(self) -> str:
         return self.get("summary").strip()
+
+    @property
+    def tariff(self) -> float:
+        """Grid price per kWh (UAH by default), for the cost in the stats."""
+        try:
+            return float(self.get("tariff").replace(",", ".") or DEFAULT_TARIFF)
+        except ValueError:
+            return DEFAULT_TARIFF
 
     def flag(self, key: str) -> bool:
         return self.get(key) == "1"

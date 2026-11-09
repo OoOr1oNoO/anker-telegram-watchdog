@@ -73,6 +73,12 @@ def window_text(L: Lang, window: str) -> str:
     return "–".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
 
 
+# settings typed in by an admin after ✏️: key -> (prompt, "could not read it", menu to show)
+TEXT_SETTINGS = {"autolight": ("al_auto_ask", "al_auto_bad", "light"),
+                 "tariff": ("tf_ask", "tf_bad", "notif")}
+PEAK_MODES = ["", "both", "end"]  # high load alerts: off, start and end, only the end
+PEAK_CHOICES = [500, 1000, 1500, 2000]
+
 ALERT_FLAGS = {"alert_outage": "f_outage", "alert_full": "f_full", "alert_expansion": "f_expansion",
                "alert_link": "f_link"}
 
@@ -175,6 +181,27 @@ class Controller:
             return ctx.L.t("unknown")
         return self.act(key, value, ctx)[0]
 
+    def text_setting(self, kind: str, text: str, ctx: Ctx) -> tuple[str, str] | None:
+        """A typed setting (TEXT_SETTINGS); returns the menu to show, None if it is not valid."""
+        if kind == "autolight":
+            span = parse_window(text)
+            if not span:
+                return None
+            value = "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
+        elif kind == "tariff":
+            try:
+                price = float(text.strip().replace(",", ".").split()[0])
+            except (ValueError, IndexError):
+                return None
+            if not 0 < price < 1000:
+                return None
+            value = f"{price:g}"
+        else:
+            return None
+        self.settings.set(kind, value)
+        log.info("Setting %s = %s by %s", kind, value, ctx.user)
+        return self.render(TEXT_SETTINGS[kind][2], ctx)
+
     def _supported(self, key: str) -> bool:
         return STATION_CONTROLS[key][0] in self.data()
 
@@ -221,7 +248,9 @@ class Controller:
                 "🔋 " + L.t("n_charge", v=", ".join(f"{t}%" for t in th) or L.t("off")),
                 "🪫 " + L.t("n_critical", v=f"{st.critical}%" if st.critical else L.t("off")),
                 "📅 " + L.t("n_summary", v=L.t("n_summary_v", t=st.summary) if st.summary else L.t("off")),
-                *(L.t("n_flag", label=L.t(label), v=on_off[st.flag(k)]) for k, label in ALERT_FLAGS.items())])
+                *(L.t("n_flag", label=L.t(label), v=on_off[st.flag(k)]) for k, label in ALERT_FLAGS.items()),
+                L.t("n_peak", v=L.t(f"peak_{st.get('peak_mode') or 'off'}"), w=st.get("peak_w") or "1000"),
+                L.t("n_tariff", v=L.money(st.tariff))])
             rows = [
                 [{"text": ("✓" if t in th else "") + f"{t}%", "callback_data": f"a:th:{t}"} for t in THRESHOLD_CHOICES],
                 # icons instead of words: five buttons in a row leave ~6 characters on a phone,
@@ -234,6 +263,11 @@ class Controller:
                  for t in SUMMARY_CHOICES + ([st.summary] if st.summary not in SUMMARY_CHOICES else [])],
                 *([{"text": ("✓ " if st.flag(k) else "✗ ") + L.t(label), "callback_data": f"a:flag:{k}"}
                    for k, label in list(ALERT_FLAGS.items())[i:i + 2]] for i in range(0, len(ALERT_FLAGS), 2)),
+                [{"text": ("•" if m == st.get("peak_mode") else "") + L.t(f"peak_btn_{m or 'off'}"),
+                  "callback_data": f"a:peak:{m or 'off'}"} for m in PEAK_MODES],
+                [{"text": ("•" if str(w) == (st.get("peak_w") or "1000") else "") + f"{w}W",
+                  "callback_data": f"a:peakw:{w}"} for w in PEAK_CHOICES]
+                + [{"text": "💰✏️", "callback_data": "a:tariff:edit"}],
             ]
             return text, self._markup(L, rows)
         if menu == "outputs":
@@ -342,6 +376,12 @@ class Controller:
             return L.t("saved"), "notif"
         if key == "sum" and (value == "off" or value in SUMMARY_CHOICES):
             st.set("summary", "" if value == "off" else value)
+            return L.t("saved"), "notif"
+        if key == "peak" and (value == "off" or value in PEAK_MODES):
+            st.set("peak_mode", "" if value == "off" else value)
+            return L.t("saved"), "notif"
+        if key == "peakw" and value.isdigit() and int(value) in PEAK_CHOICES:
+            st.set("peak_w", value)
             return L.t("saved"), "notif"
         if key == "flag" and value in ALERT_FLAGS:
             st.set(value, "0" if st.flag(value) else "1")

@@ -15,6 +15,7 @@ Config: environment variables or a .env file next to the script/exe (see .env.ex
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import logging.handlers
 import os
@@ -45,12 +46,12 @@ from .common import (
     log,
 )
 from .i18n import Lang, lang
-from .menus import Controller, Ctx, in_window
-from .stats import Settings, Stats, chart_title
+from .menus import STATION_CONTROLS, Controller, Ctx, in_window
+from .stats import Settings, Stats, chart_title, merge_slot
 from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
 from .schedule import Day, Schedule, run_schedule, windows_text
-from .watchdog import PowerPlan, Watchdog, battery_state
+from .watchdog import LoadPeaks, PowerPlan, Watchdog, battery_state
 from .widget import widget_data
 
 
@@ -105,8 +106,38 @@ def send_daily_summary(tg: Telegram, stats: Stats | None, at: str) -> None:
     tg.send_photo(chart, lambda L: "📈 " + chart_title(L, 24))
 
 
+def charge_hint(stats: Stats, snapshot: dict, limit: int | None, limits: list[int],
+                start: float) -> tuple[Callable[[Lang], str], Callable[[Lang], str] | None]:
+    """Before a planned outage: the charge it will have by then at the current input, and the AC
+    input limit that would fill it in time (a button; fast charging is left alone)."""
+    levels = snapshot.get("levels") or {}
+    if not levels:
+        return (lambda L: ""), None
+    soc = round(sum(levels.values()) / len(levels))
+    if soc >= 99:
+        return (lambda L: "\n" + L.t("ch_full")), None
+    hours = max(0.1, (start - time.time()) / 3600)
+    per_pct = stats.wh_per_percent()
+    ac_in, out = snapshot.get("ac_in") or 0, snapshot.get("out") or 0
+    if not per_pct:
+        return (lambda L: "\n" + L.t("ch_unknown", w=ac_in)), None
+    reach = min(100, round(soc + (ac_in - out) * hours / per_pct))
+    need = round((100 - soc) * per_pct / hours + out)
+    if reach >= 100:
+        return (lambda L: "\n" + L.t("ch_reach", v=reach)), None
+    best = next((w for w in sorted(limits) if w >= need), None)
+    if best is None:
+        return (lambda L: "\n" + L.t("ch_reach", v=reach) + "\n" + L.t("ch_too_much", w=need)), None
+    text = (lambda L: "\n" + L.t("ch_reach", v=reach) + "\n" + L.t("ch_need", w=need, limit=limit or "?"))
+    if limit is not None and limit >= best:
+        return text, None  # the limit allows it: the station draws what it can
+    return text, (lambda L: json.dumps({"inline_keyboard": [[
+        {"text": L.t("ch_button", w=best), "callback_data": f"a:limit:{best}@alert"}]]}))
+
+
 def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
-                   levels: Callable[[], dict[str, int] | None]) -> None:
+                   levels: Callable[[], dict[str, int] | None],
+                   hint: Callable[[float], tuple[Callable, Callable | None]] | None = None) -> None:
     """Outage schedule thread: downloads it and sends the schedule alerts."""
     def on_event(kind: str, day: Day) -> None:
         flag = "alert_sched_tomorrow" if kind == "tomorrow" else "alert_sched_change"
@@ -133,8 +164,9 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
         mins = max(1, round((start - time.time()) / 60))
         at = time.strftime("%H:%M", time.localtime(start))
         until = time.strftime("%H:%M", time.localtime(end)) if end - start < 86400 else "?"
+        extra, markup = hint(start) if hint else ((lambda L: ""), None)
         tg.send(lambda L: L.t("al_sched_soon", start=at, mins=mins, end=until,
-                              charge=L.charge(lv) if lv else "?"))
+                              charge=L.charge(lv) if lv else "?") + extra(L), markup)
 
     threading.Thread(target=run_schedule, args=(schedule, on_event, on_soon), daemon=True).start()
 
@@ -210,12 +242,13 @@ async def run(args: argparse.Namespace) -> None:
         "alert_outage": "1", "alert_full": "1", "alert_expansion": "1", "alert_link": "1",
         "sched_source": "", "sched_group": "", "sched_label": "",
         "alert_sched_soon": "1", "alert_sched_tomorrow": "1", "alert_sched_change": "1",
-        "autolight": "",
+        "autolight": "", "tariff": "4.32", "peak_mode": "both", "peak_w": "1000",
     })
     schedule = Schedule(settings, stats) if stats else None
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
                         full_confirm_s=args.full_confirm)
     watchdog.note = lambda L, kind, ts: alert_note(schedule, L, kind, ts)
+    peaks = LoadPeaks(tg, settings)
     healthcheck = os.environ.get("HEALTHCHECK_URL", "").strip()
 
     if args.test_telegram:
@@ -278,7 +311,7 @@ async def run(args: argparse.Namespace) -> None:
             since = watchdog.outage_started if watchdog.on_battery else stats.last_outage_end()
             fact = stats.grid_slots(today.timestamp(), now_wall)
             if grid is not None:  # the current half hour: the state right now counts too
-                fact = fact[:-1] + ("0" if not grid or fact[-1:] == "0" else "1")
+                fact = fact[:-1] + merge_slot(fact[-1:] or "-", grid)
             plan_today = plan_tomorrow = group = ""
             change, emergency = None, False
             if schedule and schedule.configured:
@@ -309,7 +342,11 @@ async def run(args: argparse.Namespace) -> None:
         if schedule:
             handlers.sched = controller.sched = ScheduleMenu(schedule)
             handlers.widget, controller.widgets = widget_info, True
-            start_schedule(tg, schedule, settings, lambda: last_levels)
+            def hint(start: float):
+                limit = as_int(controller._state("limit")) if controller._supported("limit") else None
+                limits = [int(v) for v in STATION_CONTROLS["limit"][1]] if limit is not None else []
+                return charge_hint(stats, snapshot, limit, limits, start)
+            start_schedule(tg, schedule, settings, lambda: last_levels, hint)
         threading.Thread(target=run_autolight, args=(watchdog, controller, settings, tg, stats),
                          daemon=True).start()
         tg.listen_commands(handlers)
@@ -391,6 +428,7 @@ async def run(args: argparse.Namespace) -> None:
                                           round(sum(levels.values()) / len(levels)), grid)
                     last_load = as_int(data.get("output_power_total"))
                     watchdog.evaluate(grid, ac_in, levels, remaining_h, last_load)
+                    peaks.update(last_load)
                     continue
             # keep re-evaluating so the outage confirm timer runs between messages
             if watchdog.no_grid_since is not None and not watchdog.on_battery and last_levels:

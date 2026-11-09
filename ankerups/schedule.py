@@ -183,7 +183,7 @@ class Schedule:
         if self.stats:
             self.stats.meta("sched_seen", "")  # new group: no "changed" alerts for the old one
 
-    def download(self) -> list[Day]:
+    def download(self, now: float | None = None) -> list[Day]:
         if self.source != "kyiv":
             return oblast_days(self.fetch(OBLAST_URL), self.group)
         days = yasno_days(self.fetch(f"{YASNO}/regions/{KYIV_REGION}/dsos/{KYIV_DSO}/planned-outages"), self.group)
@@ -201,7 +201,7 @@ class Schedule:
             if day.status == "emergency":
                 day.slots = plans.get(day.date, "")
         if self.stats:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.fromtimestamp(time.time() if now is None else now).strftime("%Y-%m-%d")
             self.stats.meta("sched_plan", json.dumps({d: s for d, s in plans.items() if d >= today}))
         return days
 
@@ -214,7 +214,7 @@ class Schedule:
         if not self.configured or (now - self.updated < FETCH_EVERY and self.fetched_for == key):
             return []
         try:
-            days = self.download()
+            days = self.download(now)
         except Exception as exc:
             log.warning("Schedule download failed: %s", exc)
             self.updated, self.fetched_for = now - FETCH_EVERY + 120, key  # try again in 2 minutes

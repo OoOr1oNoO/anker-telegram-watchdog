@@ -266,3 +266,62 @@ def battery_state(data: dict) -> tuple[dict[str, int] | None, int]:
         return {"main": main}, packs
     return {"main": main} | {("expansion" if len(exps) == 1 else f"expansion {i}"): e
                              for i, e in enumerate(exps, 1)}, packs
+
+
+class LoadPeaks:
+    """High load (a kettle, a heater): a message when it starts and / or a summary when it ends.
+
+    Settings: peak_mode ("" off, "both" start and end, "end" only the summary), peak_w (the
+    threshold). A peak starts after 10 s above the threshold and ends after 30 s below 80 % of it,
+    so a kettle switching its element on and off stays one peak.
+    """
+
+    START_S, END_S = 10, 30
+
+    def __init__(self, tg: Telegram, settings: Settings):
+        self.tg = tg
+        self.settings = settings
+        self.above_since: float | None = None
+        self.below_since: float | None = None
+        self.start: float | None = None  # wall clock of an active peak
+        self.peak_w = 0
+        self.wh = 0.0
+        self.last = 0.0
+
+    def update(self, out: int | None, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        mode = self.settings.get("peak_mode")
+        threshold = as_int(self.settings.get("peak_w")) or 1000
+        out = out or 0
+        if not mode:
+            self.start = self.above_since = None
+            return
+        if self.start is None:
+            if out < threshold:
+                self.above_since = None
+                return
+            self.above_since = self.above_since or now
+            if now - self.above_since >= self.START_S:
+                self.start, self.peak_w, self.wh, self.last = self.above_since, out, 0.0, now
+                self.below_since = None
+                if mode == "both":
+                    at, w = time.strftime("%H:%M", time.localtime(self.start)), out
+                    self.tg.send(lambda L: L.t("al_peak_start", w=w, t=at))
+            return
+        self.wh += out * (now - self.last) / 3600
+        self.last = now
+        self.peak_w = max(self.peak_w, out)
+        if out >= threshold * 0.8:
+            self.below_since = None
+            return
+        self.below_since = self.below_since or now
+        if now - self.below_since < self.END_S:
+            return
+        start, end, w, kwh = self.start, self.below_since, self.peak_w, self.wh / 1000
+        tariff = self.settings.tariff
+        self.start = self.above_since = self.below_since = None
+        log.info("High load %s-%s, up to %d W, %.3f kWh", time.strftime("%H:%M", time.localtime(start)),
+                 time.strftime("%H:%M", time.localtime(end)), w, kwh)
+        self.tg.send(lambda L: L.t("al_peak_end", start=time.strftime("%H:%M", time.localtime(start)),
+                                   end=time.strftime("%H:%M", time.localtime(end)), dur=L.dur(max(60, end - start)),
+                                   w=w, e=L.energy(kwh), cost=L.money(kwh * tariff)))

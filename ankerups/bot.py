@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from .common import log
 from .i18n import Lang, Render, lang
-from .menus import Controller, Ctx, parse_window
+from .menus import TEXT_SETTINGS, Controller, Ctx
 from .stats import Stats, chart_title
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
@@ -129,12 +129,12 @@ class Telegram:
     def keyboard(self, L: Lang) -> str:
         return main_keyboard(L, self.panel_button())
 
-    def send(self, render: Render) -> None:
-        """Alert to all active chats, each in its language."""
+    def send(self, render: Render, markup: Render | None = None) -> None:
+        """Alert to all active chats, each in its language; markup: inline buttons under it."""
         log.info("ALERT: %s", render(lang("en")))
         if self.enabled:
             stamp = time.strftime("%H:%M:%S")
-            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", None, None, None, False))
+            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", markup, None, None, False))
 
     def reply(self, chat: str, text: str | Render, markup: str | Render | None = None,
               code: str | None = None, title: bool = False) -> None:
@@ -157,6 +157,12 @@ class Telegram:
         photos: dict[str, bytes | None] = {}  # one chart per language
         for chat in chats:
             L = lang(code) if code else self.lang_of(chat)
+            if kind == "rich":  # a rich message (tables); the text version if it is refused
+                try:
+                    self._deliver_rich(chat, payload(L), extra(L), self.keyboard(L))
+                except Exception:
+                    log.exception("Rich message failed")
+                continue
             if kind == "widget":
                 try:
                     name, data = payload()
@@ -200,6 +206,19 @@ class Telegram:
             except Exception as exc:  # no internet during outage is expected
                 log.warning("Telegram send failed (%s), retrying in 15s", exc)
             time.sleep(15)
+
+    def reply_rich(self, chat: str, html: Render, fallback: Render) -> None:
+        if self.enabled:
+            self.queue.put(("rich", html, fallback, chat, None, False))
+
+    def _deliver_rich(self, chat: str, html: str, fallback: str, markup: str) -> None:
+        try:
+            self._call("sendRichMessage", {"chat_id": chat, "rich_message": json.dumps({"html": html}),
+                                           "reply_markup": markup})
+        except urllib.error.HTTPError as exc:
+            log.warning("sendRichMessage to %s failed: %s %s, sending text", chat, exc.code,
+                        exc.read().decode(errors="replace")[:200])
+            self._deliver("text", chat, (fallback, markup, True))
 
     def send_widget(self, chat: str, data: Callable[[], tuple[str, str]], fallback: Render) -> None:
         """📊 Status as a live widget; fallback is the text status if the widget is refused."""
@@ -308,16 +327,20 @@ class Telegram:
                 except Exception:
                     log.exception("Telegram update handling failed")
 
-    def _handle_stats(self, chat: str, action: str, stats: "Stats", L: Lang) -> str:
+    def _handle_stats(self, chat: str, action: str, stats: "Stats", L: Lang, tariff: float) -> str:
         if action.startswith("chart"):
             hours = int(action.removeprefix("chart"))
             if stats.chart_png(hours, L) is None:
                 return L.t("not_enough")
-            self.send_photo(lambda L: stats.chart_png(hours, L), lambda L: "📈 " + chart_title(L, hours), chat)
+            e_in, e_out = stats.energy_kwh(time.time() - hours * 3600)
+            self.send_photo(lambda L: stats.chart_png(hours, L), lambda L: "📈 " + chart_title(L, hours) + "\n" + L.t(
+                "chart_energy", e_in=L.energy(e_in), cost=L.money(e_in * tariff), e_out=L.energy(e_out)), chat)
             return L.t("chart_sent")
-        texts = {"outages": stats.outages_text, "energy": stats.energy_text, "months": stats.months_text}
-        if action in texts:
-            self.reply(chat, texts[action], title=True)
+        rich = {"outages": (stats.outages_html, stats.outages_text),
+                "energy": (lambda L: stats.energy_html(L, tariff), stats.energy_text),
+                "months": (lambda L: stats.months_html(L, tariff), stats.months_text)}
+        if action in rich:
+            self.reply_rich(chat, *rich[action])
         return L.t("sent")
 
     def _edit(self, msg: dict, view: tuple[str, str | None]) -> None:
@@ -367,17 +390,15 @@ class Telegram:
         users.note(chat, chat_name(chat_obj, sender), sender.get("language_code"),
                    chat_obj.get("type") == "private")
         L = users.lang(chat)
-        if not action and (chat, user) in self.awaiting and self.awaiting[(chat, user)][0] == "autolight":
-            _, asked = self.awaiting.pop((chat, user))
+        if not action and (chat, user) in self.awaiting and self.awaiting[(chat, user)][0] in TEXT_SETTINGS:
+            kind, asked = self.awaiting.pop((chat, user))
             if time.time() - asked < 600 and users.is_admin(user):
-                if span := parse_window(text):
-                    window = "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
-                    h.controller.settings.set("autolight", window)
-                    log.info("Auto light hours %s by %s", window, user)
-                    self.reply(chat, *h.controller.render("light", Ctx(L, True, chat, user)), title=True)
+                view = h.controller.text_setting(kind, text, Ctx(L, True, chat, user))
+                if view:
+                    self.reply(chat, *view, title=True)
                 else:
-                    self.awaiting[(chat, user)] = ("autolight", time.time())
-                    self.reply(chat, L.t("al_auto_bad"), FORCE_REPLY)
+                    self.awaiting[(chat, user)] = (kind, time.time())
+                    self.reply(chat, L.t(TEXT_SETTINGS[kind][1]), FORCE_REPLY)
             return
         if not action and (chat, user) in self.awaiting and h.sched:
             kind, asked = self.awaiting.pop((chat, user))
@@ -411,8 +432,10 @@ class Telegram:
     def _ask(self, chat: str, user: str, kind: str, h: BotHandlers) -> None:
         """Ask an admin for typed input (street, house) with a force-reply message."""
         self.awaiting[(chat, user)] = (kind, time.time())
-        self.reply(chat, (lambda L: L.t("al_auto_ask")) if kind == "autolight" else (lambda L: h.sched.prompt(kind, L)),
-                   FORCE_REPLY)
+        if kind in TEXT_SETTINGS:
+            self.reply(chat, lambda L: L.t(TEXT_SETTINGS[kind][0]), FORCE_REPLY)
+        else:
+            self.reply(chat, lambda L: h.sched.prompt(kind, L), FORCE_REPLY)
 
     def _stranger(self, chat: str, name: str, code: str | None) -> None:
         """Someone who is not a user pressed /start (or added the bot to a group)."""
@@ -469,7 +492,7 @@ class Telegram:
                 toast = ctx.L.t("only_admins")
                 log.info("Denied %s:%s from user %s", kind, rest, user)
             elif kind == "stats" and h.stats:
-                toast = self._handle_stats(chat, rest, h.stats, ctx.L)
+                toast = self._handle_stats(chat, rest, h.stats, ctx.L, h.controller.settings.tariff)
             elif kind == "m":
                 self._edit(msg, h.controller.render(rest, ctx))
             elif kind == "l":
@@ -477,12 +500,13 @@ class Telegram:
                 ctx.L = users.lang(chat)
                 self._edit(msg, h.controller.render("lang", ctx))
                 self.reply(chat, ctx.L.t("lang_title", v=LANG_NAMES[ctx.L.code]))  # refreshes the keyboard
-            elif kind == "a" and rest == "autolight:edit":  # ✏️: own hours for the auto light
-                self._ask(chat, user, "autolight", h)
+            elif kind == "a" and rest.endswith(":edit") and rest.split(":")[0] in TEXT_SETTINGS:  # ✏️
+                self._ask(chat, user, rest.split(":")[0], h)
             elif kind == "a":
                 key, _, value = rest.partition(":")
                 toast, menu = h.controller.act(key, value, ctx)
-                self._edit(msg, h.controller.render(menu, ctx))
+                if menu != "alert":  # a button under an alert keeps the alert as it is
+                    self._edit(msg, h.controller.render(menu, ctx))
             elif kind == "u":
                 toast = self._user_action(rest, ctx, msg, h)
             elif kind == "g" and h.sched:

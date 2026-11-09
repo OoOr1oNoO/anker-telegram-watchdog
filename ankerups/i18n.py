@@ -20,14 +20,14 @@ class Lang:
         text = row[self.i] or row[0]
         return text.format(**kw) if kw else text
 
-    def dur(self, seconds: float) -> str:
-        """36m, 5h 03m, or 11d 2h (266h 42m) for long ones."""
+    def dur(self, seconds: float, compact: bool = False) -> str:
+        """36m, 5h 03m, or 11d 2h (266h 42m) for long ones (266h 42m when compact, for tables)."""
         d_u, h_u, m_u, _ = UNITS[self.code]
         minutes = max(0, int(seconds // 60))
         hours, m = divmod(minutes, 60)
         if minutes < 60:
             return f"{minutes}{m_u}"
-        if hours < 24:
+        if hours < 24 or compact:
             return f"{hours}{h_u} {m:02d}{m_u}"
         d, h = divmod(hours, 24)
         return f"{d}{d_u} {h}{h_u} ({hours}{h_u} {m:02d}{m_u})"
@@ -54,6 +54,9 @@ class Lang:
             return f"{next(iter(levels.values()))}%"
         total = round(sum(levels.values()) / len(levels))
         return f"{total}% ({', '.join(f'{self.battery(k)} {v}%' for k, v in levels.items())})"
+
+    def money(self, amount: float) -> str:
+        return f"{amount:.2f} {self.t('currency')}"
 
     def month(self, number: int) -> str:
         return MONTHS[self.code][number - 1]

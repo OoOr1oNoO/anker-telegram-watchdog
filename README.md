@@ -22,9 +22,14 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light).
   **💡 Auto light**: during an outage in the evening (17–23, 18–24, 18–01 or your own hours)
   the bot turns the 12V output on, and off again when the power is back or the hours end
-- **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days, outage history,
-  outages and energy by month, energy through the station (kWh in / out) and a daily summary
-  with a chart (data is kept in `anker_ups.db` next to the script)
+- **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days (with the energy and
+  its cost), and tables: outages by day, outages and energy by month, energy through the station
+  (kWh in / out and the cost at your tariff, 4.32 UAH/kWh by default); a daily summary with a
+  chart (data is kept in `anker_ups.db` next to the script)
+- **🔥 High load** alerts (a kettle, a heater): when it starts and / or a summary when it ends,
+  with the energy and its cost; threshold and mode in **⚙️ Settings → 🔔 Notifications**
+- Before a planned outage: the charge the battery will have by then and, if it would not be
+  full, the AC input limit that fills it in time (a button; fast charging is left alone)
 - **⚙️ Settings** button: charge alert thresholds, critical level, daily summary time and which
   alerts to send; station outputs (AC / DC 12V on-off, Normal / Smart mode; turning AC off asks
   for confirmation), AC charge limit, fast charging, display brightness and timeout, auto-off.

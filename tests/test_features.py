@@ -124,3 +124,14 @@ def test_thresholds_survive_a_restart_in_an_outage(stats, settings, monkeypatch)
     feed(w, {"main": 100, "expansion": 50})
     assert [s.split(",")[0] for s in sent if s.startswith("🔋")] == ["🔋 Battery (expansion) 74% (threshold 75%)",
                                                                        "🔋 Battery (expansion) 50% (threshold 50%)"]
+
+
+def test_actual_row_marks_partial_half_hours(stats, monkeypatch):
+    import time as t
+    midnight = 1794088800
+    for minute, grid in ((0, True), (1, True), (30, True), (31, False), (60, False), (61, False)):
+        monkeypatch.setattr(t, "time", lambda m=minute: midnight + m * 60 + 1)
+        stats.add_reading(100 if grid else 0, 50, 80, grid)
+    monkeypatch.setattr(t, "time", lambda: midnight + 62 * 60)
+    stats.add_reading(0, 50, 80, False)  # flushes the last minute
+    assert stats.grid_slots(midnight, midnight + 62 * 60) == "1p0"
