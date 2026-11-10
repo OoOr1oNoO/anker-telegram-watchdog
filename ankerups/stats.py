@@ -229,15 +229,18 @@ class Stats:
         while len(starts) < count:
             starts.append((starts[-1] - timedelta(days=1)).replace(day=1))
         first = self._exec("SELECT MIN(ts) FROM samples")[0][0]
-        rows = [[L.t("t_month"), L.t("t_outages"), L.t("t_off"), L.t("t_in"), L.t("t_cost")]]
+        rows = [[L.t("t_month"), L.t("t_outages"), L.t("t_off"), L.t("t_on"), L.t("t_in"), L.t("t_cost")]]
         for i, start in enumerate(starts):
             s, e = start.timestamp(), (now if i == 0 else starts[i - 1]).timestamp()
             if first and e <= first:
                 break
             spans = [min(b, e) - max(a, s) for a, b, *_ in self.outages_between(s, e)]
             e_in, _ = self.energy_kwh(s, e)
-            rows.append([f"{L.month(start.month)} {start.year}", str(len(spans)), L.dur(sum(spans), True),
-                         f"{e_in:.2f}", L.money(e_in * tariff)])
+            off, known = sum(spans), e - max(s, first or s)  # only the time with data
+            on = max(0.0, known - off)
+            share = f" · {round(100 * on / known)}%" if known > 0 else ""
+            rows.append([f"{L.month(start.month)} {start.year}", str(len(spans)), L.dur(off, True),
+                         L.dur(on, True) + share, f"{e_in:.2f}", L.money(e_in * tariff)])
         footer = (f"<footer>{esc(L.t('mo_since', date=datetime.fromtimestamp(first).strftime('%d.%m.%Y')))}</footer>"
                   if first and first > starts[-1].timestamp() else "")
         return f"<h3>{esc(L.t('mo_title'))}</h3>" + table(rows) + footer

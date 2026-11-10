@@ -37,7 +37,7 @@ def test_outages_and_months_tables(stats):
     assert "59h 00m" in html and "<table bordered striped compact>" in html  # one row per day
     assert "<td>60%</td>" in html
     months = stats.months_html(EN, 4.32)
-    assert months.count("<tr>") >= 2 and "UAH" in months
+    assert months.count("<tr>") >= 2 and "UAH" in months and ">Grid<" in months and "%</td>" in months
 
 
 def test_stats_buttons_send_rich_tables_or_text(bot: FakeBot, stats):

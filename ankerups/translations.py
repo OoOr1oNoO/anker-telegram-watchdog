@@ -578,6 +578,7 @@ TEXTS: dict[str, tuple[str, str, str, str, str, str]] = {
     "t_month": ("Month", "Місяць", "Месяц", "Miesiąc", "Monat", "Mes"),
     "t_outages": ("Outages", "Відкл.", "Откл.", "Przerwy", "Ausfälle", "Cortes"),
     "t_off": ("No grid", "Без світла", "Без света", "Bez prądu", "Ohne Strom", "Sin luz"),
+    "t_on": ("Grid", "Зі світлом", "Со светом", "Z prądem", "Mit Strom", "Con luz"),
     "chart_energy": ("In {e_in} ≈ {cost}, out {e_out}", "Вхід {e_in} ≈ {cost}, вихід {e_out}",
                      "Вход {e_in} ≈ {cost}, выход {e_out}", "Wejście {e_in} ≈ {cost}, wyjście {e_out}",
                      "Ein {e_in} ≈ {cost}, aus {e_out}", "Entrada {e_in} ≈ {cost}, salida {e_out}"),

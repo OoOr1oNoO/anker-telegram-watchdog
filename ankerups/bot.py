@@ -130,6 +130,7 @@ class Telegram:
         self.widget_paused: dict[str, float] = {}  # "chat|look" -> until when its edits are refused
         self.blocked: dict[str, float] = {}  # chat -> when to try its held alerts again
         self.widgets_blocked: dict[str, float] = {}  # "chat|look" -> until when new widgets are refused
+        self.cannot_delete: dict[str, float] = {}  # groups where the bot is not an admin: until when
         self.keyboard_blocked: dict[str, float] = {}  # the same for messages with the reply keyboard
         self.deferred: dict[str, list[str]] = {}  # texts held for a blocked chat
         self.temps: Callable[[], dict] | None = None  # daily temperatures for the stats, set by the app
@@ -318,6 +319,9 @@ class Telegram:
             log.warning("sendWidget to %s failed: %s %s, sending text", chat, exc.code, body[:200])
             if exc.code == 429:
                 self.widgets_blocked[f"{chat}|{style}"] = time.time() + (retry_after(body) or 60)
+            elif "WIDGET_NOT_ALLOWED" in body:  # groups: widgets are for private chats for now
+                for look in ("widget", "ios", "clock", "quick"):
+                    self.widgets_blocked[f"{chat}|{look}"] = time.time() + 86400
             self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
             return
         with self.widget_lock:
@@ -543,9 +547,14 @@ class Telegram:
                 self.send_widget(chat, h.widget, h.status, style)
             else:
                 self.reply(chat, h.status(L), title=True)
-        if action and msg.get("message_id"):  # the button press itself: the chat keeps only the answers
-            with contextlib.suppress(Exception):  # groups: only when the bot is an admin
+        if action and msg.get("message_id") and not self._blocked(chat, self.cannot_delete):  # the press
+            try:  # groups: only when the bot is an admin allowed to delete messages
                 self._call("deleteMessage", {"chat_id": chat, "message_id": msg["message_id"]})
+            except urllib.error.HTTPError as exc:
+                log.info("Cannot delete button presses in %s: %s", chat, exc.read().decode(errors="replace")[:120])
+                self.cannot_delete[chat] = time.time() + 3600  # it may be made an admin later
+            except Exception:
+                pass
 
     def _ask(self, chat: str, user: str, kind: str, h: BotHandlers) -> None:
         """Ask an admin for typed input (street, house) with a force-reply message."""
