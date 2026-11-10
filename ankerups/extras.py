@@ -9,11 +9,13 @@ chosen region are kept in the stats DB.
 (default "Київська область"); WEATHER=0 or ALERT_REGION=- turns a part off.
 """
 
+import contextlib
 import json
 import os
 import threading
 import time
 import urllib.request
+from datetime import datetime
 
 from .common import log
 
@@ -50,6 +52,15 @@ def temp_color(t: float) -> str:
     return "#ff3b30"
 
 
+def _since(rows: list[dict]) -> float | None:
+    """The earliest start of NEPTUN alert rows (ISO time, UTC), None if none is given."""
+    starts = []
+    for r in rows:
+        with contextlib.suppress(Exception):
+            starts.append(datetime.fromisoformat(r["since"].replace("Z", "+00:00")).timestamp())
+    return int(min(starts)) if starts else None
+
+
 class Extras:
     def __init__(self, stats=None, fetch=fetch_json, env=None):
         env = os.environ if env is None else env
@@ -67,9 +78,14 @@ class Extras:
         self.alert = ""  # see _alert_kind
         self.alert_since: float | None = None
         self._weather_at = self._alerts_at = 0.0
-        if stats and self.region != "-":  # an alert still open from before a restart
+        self._started: float | None = None  # when the current alert began, as the source says
+        if stats and self.region != "-":  # an alert still on from before a restart keeps its start
+            try:
+                self.alert, self.alert_since = json.loads(stats.meta("alert") or '["", null]')
+            except (ValueError, TypeError):
+                pass
             row = stats._exec("SELECT start FROM alerts WHERE end IS NULL ORDER BY start DESC LIMIT 1")
-            if row:
+            if row and self.alert not in OWN:
                 self.alert, self.alert_since = "o", row[0][0]
 
     def refresh(self, now: float | None = None) -> None:
@@ -100,10 +116,17 @@ class Extras:
                     self.stats._exec("INSERT INTO alerts (start) VALUES (?)", (int(now),))
                 else:
                     self.stats._exec("UPDATE alerts SET end = ? WHERE end IS NULL", (int(now),))
+            since = self.alert_since
             if kind != self.alert:
                 log.info("Air-raid alert: %r -> %r", self.alert, kind)
-                keep = own and was_own or kind == self.alert  # yellow <-> red: the same alert goes on
-                self.alert, self.alert_since = kind, (self.alert_since if keep else now if kind else None)
+                keep = own and was_own  # yellow <-> red: the same alert goes on
+                since = since if keep else now if kind else None
+            if kind and self._started:  # NEPTUN gives the start (the earliest one in the nearby region)
+                since = min(since, self._started) if own and was_own and since else self._started
+            if (kind, since) != (self.alert, self.alert_since):
+                self.alert, self.alert_since = kind, since
+                if self.stats:
+                    self.stats.meta("alert", json.dumps([kind, since]))
 
     def _alert_kind(self) -> str | None:
         """"r" / "y": the region's red / yellow alert (NEPTUN), "o": the region's alert of an unknown
@@ -112,11 +135,14 @@ class Extras:
             data = self.fetch(NEPTUN_URL)
             rows = data.get("oblasts", []) + data.get("raions", [])
             here = [r for r in data.get("oblasts", []) if r.get("name", "").lower() == self.region.lower()]
+            near = [r for r in rows if r.get("oblast", "").lower() == self.near.lower()]
+            self._started = _since(here or near)
             if here:
                 return "r" if any(r.get("level", "red") == "red" for r in here) else "y"
-            return "n" if any(r.get("oblast", "").lower() == self.near.lower() for r in rows) else ""
+            return "n" if near else ""
         except Exception as exc:
             log.warning("NEPTUN alerts download failed: %s", exc)
+        self._started = None
         try:
             states = self.fetch(ALERTS_URL).get("states", {})
         except Exception as exc:

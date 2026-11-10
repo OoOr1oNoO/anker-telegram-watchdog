@@ -58,7 +58,7 @@ def test_alert_open_across_restart_and_off_switches(stats):
     feed.here = True
     extras.Extras(stats, fetch=feed, env={}).refresh(1_800_000_000)
     x = extras.Extras(stats, fetch=feed, env={})  # restarted during the alert
-    assert x.alert == "o"
+    assert x.alert == "y" and x.alert_since == 1_800_000_000
     x.refresh(1_800_000_060)
     assert x.alert == "y" and x.alert_since == 1_800_000_000
     off = extras.Extras(stats, fetch=feed, env={"WEATHER": "0", "ALERT_REGION": "-"})
@@ -74,3 +74,27 @@ def test_outages_table_with_temperature_and_alerts(stats):
     day = time.strftime("%Y-%m-%d", time.localtime(now - 3 * 3600))
     html = stats.outages_html(lang("en"), temps={day: (1.2, 7.9)})
     assert "<th><b>t°</b></th>" in html and "<td>1…8°</td>" in html and "<td>2h 00m</td>" in html
+
+
+def test_nearby_alert_keeps_its_start_across_restart(stats):
+    feed = Feed()
+    feed.near = True
+    extras.Extras(stats, fetch=feed, env={}).refresh(1_800_000_000)
+    x = extras.Extras(stats, fetch=feed, env={})
+    x.refresh(1_800_000_600)
+    assert x.widget()["al"] == ["n", 1_800_000_000]
+
+
+def test_alert_start_comes_from_neptun(stats):
+    feed = Feed()
+    feed.near = True
+    rows = feed.__call__
+
+    def with_since(url):
+        d = rows(url)
+        for r in d.get("raions", []):
+            r["since"] = "2027-01-15T08:00:00.5Z"
+        return d
+    x = extras.Extras(stats, fetch=with_since, env={})
+    x.refresh(1_800_000_000)
+    assert x.widget()["al"] == ["n", 1_800_000_000]  # 2027-01-15 08:00 UTC
