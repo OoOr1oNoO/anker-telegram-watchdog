@@ -51,6 +51,7 @@ class Stats:
             CREATE TABLE IF NOT EXISTS outages (id INTEGER PRIMARY KEY, start INTEGER,
                                                 end INTEGER, soc_start INTEGER, soc_end INTEGER);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY, start INTEGER, end INTEGER);
         """)
         self.minute: int | None = None
         self.acc: list[tuple[float, float, int, bool]] = []
@@ -185,9 +186,15 @@ class Stats:
         return (f"<h3>{esc(L.t('en_title_short'))}</h3>" + table(rows)
                 + f"<footer>{esc(L.t('t_tariff_note', v=L.money(tariff)))}</footer>")
 
-    def outages_html(self, L: Lang, days: int = 30) -> str:
+    def alert_seconds(self, day_start: float, day_end: float) -> float:
+        """Seconds of air-raid alert in the chosen region within a period."""
+        rows = self._exec("SELECT start, COALESCE(end, ?) FROM alerts WHERE start < ? AND COALESCE(end, ?) > ?",
+                          (int(time.time()), int(day_end), int(time.time()), int(day_start)))
+        return sum(min(e, day_end) - max(s, day_start) for s, e in rows)
+
+    def outages_html(self, L: Lang, days: int = 30, temps: dict[str, tuple[float, float]] | None = None) -> str:
         """One row per day (by the start of the outage): time without grid, the outages, the lowest
-        charge they ended with."""
+        charge they ended with; with the day's temperature and air-raid alert hours when known."""
         now = time.time()
         found = self.outages_between(now - days * 86400, now)
         if not found:
@@ -196,14 +203,23 @@ class Stats:
         by_day: dict[str, list] = {}
         for outage in found:
             by_day.setdefault(datetime.fromtimestamp(outage[0]).strftime("%d.%m"), []).append(outage)
-        rows = [[L.t("t_day"), L.t("t_off"), L.t("t_when"), L.t("t_min")]]
+        alerts = bool(self._exec("SELECT 1 FROM alerts LIMIT 1"))
+        rows = [[L.t("t_day"), L.t("t_off"), L.t("t_when"), L.t("t_min")] + (["t°"] if temps else [])
+                + (["🚨"] if alerts else [])]
         for day, outages in list(by_day.items())[::-1]:
             spans = ", ".join(f"{datetime.fromtimestamp(s):%H:%M}–" + (f"{datetime.fromtimestamp(e):%H:%M}"
                                                                          if soc_end is not None else "…")
                               for s, e, _, soc_end in outages)
             ends = [soc_end for *_, soc_end in outages if soc_end is not None]
-            rows.append([day, L.dur(sum(e - s for s, e, *_ in outages), True), spans,
-                         f"{min(ends)}%" if ends else "—"])
+            row = [day, L.dur(sum(e - s for s, e, *_ in outages), True), spans, f"{min(ends)}%" if ends else "—"]
+            start = datetime.fromtimestamp(outages[0][0]).replace(hour=0, minute=0, second=0, microsecond=0)
+            if temps:
+                lo_hi = temps.get(start.strftime("%Y-%m-%d"))
+                row.append(f"{round(lo_hi[0])}…{round(lo_hi[1])}°" if lo_hi else "—")
+            if alerts:
+                sec = self.alert_seconds(start.timestamp(), start.timestamp() + 86400)
+                row.append(L.dur(sec, True) if sec >= 60 else "—")
+            rows.append(row)
         return (f"<h3>{esc(L.t('out_title', days=days, n=len(found), dur=L.dur(total, True)))}</h3>"
                 + table(rows, compact=True))
 

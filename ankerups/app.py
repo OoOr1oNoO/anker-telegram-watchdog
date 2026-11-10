@@ -52,6 +52,7 @@ from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
 from .schedule import Day, Schedule, run_schedule, windows_text
 from .watchdog import LoadPeaks, PowerPlan, Watchdog, battery_state
+from .extras import Extras
 from .widget import MAX_OUTPUT, widget_data
 
 
@@ -248,7 +249,13 @@ async def run(args: argparse.Namespace) -> None:
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
                         full_confirm_s=args.full_confirm)
     watchdog.note = lambda L, kind, ts: alert_note(schedule, L, kind, ts)
+    if schedule:
+        watchdog.planned_off = schedule.planned_off
     peaks = LoadPeaks(tg, settings)
+    extras = Extras(stats) if stats else None  # weather and air-raid alerts for the widgets and stats
+    if extras:
+        extras.start()
+        tg.temps = lambda: extras.daily
     healthcheck = os.environ.get("HEALTHCHECK_URL", "").strip()
 
     if args.test_telegram:
@@ -325,7 +332,8 @@ async def run(args: argparse.Namespace) -> None:
                                snapshot.get("remaining_h") if watchdog.on_battery else None,
                                fact, plan_today, plan_tomorrow, change, group,
                                datetime.now().hour * 60 + datetime.now().minute, emergency,
-                               *controller.widget_controls(), MAX_OUTPUT.get(device.get("device_pn")))
+                               *controller.widget_controls(), MAX_OUTPUT.get(device.get("device_pn")),
+                               extras.widget() if extras else None)
             return watchdog.name, data
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
@@ -420,6 +428,7 @@ async def run(args: argparse.Namespace) -> None:
                     # these models have no charging_status, and with a full battery and a small
                     # load the AC input drops to 0 W while the grid is up
                     plug = as_int(data.get("ac_input_plug_status"))
+                    watchdog.plug_known = watchdog.plug_known or plug is not None
                     if plug != last_plug:
                         log.info("ac_input_plug_status %s -> %s (ac_in %s W)", last_plug, plug, ac_in)
                         last_plug = plug

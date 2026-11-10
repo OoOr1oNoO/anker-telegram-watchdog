@@ -30,6 +30,7 @@ def run(monkeypatch, stats, settings):
         def restore(self): ...
 
     w = Watchdog(TG(), Power(), 10, settings, "Station", stats, full_confirm_s=180)
+    w.planned_off = lambda ts: True  # the 3-minute wait; the schedule-aware one is tested below
 
     def feed(seconds, ac_in, levels, load=0, step=4):
         for _ in range(int(seconds / step)):
@@ -37,6 +38,7 @@ def run(monkeypatch, stats, settings):
             clock.t += step
 
     feed.sent = sent
+    feed.w = w
     return feed
 
 
@@ -95,3 +97,19 @@ def test_no_full_charge_alert_after_short_outage_at_full(run):
     run(20, 0, FULL, load=120)
     run(20, 120, FULL, load=120)
     assert not [text for _, text in run.sent if "Fully charged" in text]
+
+
+def test_full_idle_station_waits_10_minutes_unless_an_outage_is_planned(run):
+    run.w.planned_off = lambda ts: False  # the schedule says the power is on
+    run(20, 16, FULL)
+    run(400, 0, FULL)  # night pauses of up to ~6 min with the grid up
+    assert run.sent == []
+    run(260, 0, FULL)
+    assert len(run.sent) == 1 and "lost AC input at " in run.sent[0][1]
+
+
+def test_stations_with_a_plug_status_never_wait(run):
+    run.w.plug_known, run.w.planned_off = True, (lambda ts: None)
+    run(20, 16, FULL)
+    run(20, 0, FULL)
+    assert len(run.sent) == 1

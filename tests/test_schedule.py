@@ -211,3 +211,12 @@ def test_next_change_follows_the_actual_grid(schedule):
     assert schedule.next_change(at(17, 15), grid=False) == (at(17, 30), "1")
     assert schedule.next_change(at(18), grid=False) is None  # an outage the plan did not have, no "on" ahead today
     assert schedule.next_change(at(8), grid=True) == (at(9), "0")
+
+
+def test_planned_off_now_or_soon(schedule):
+    assert schedule.planned_off(at(8)) is None  # not set up
+    schedule.set("kyiv", "12.1", "x")  # off 00:00-05:30, 09:00-17:30, 19:00-24:00
+    schedule.refresh(at(8))
+    assert schedule.planned_off(at(10)) is True
+    assert schedule.planned_off(at(8, 45)) is True  # 15 min before
+    assert schedule.planned_off(at(7)) is False

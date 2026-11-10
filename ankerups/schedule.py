@@ -295,6 +295,18 @@ class Schedule:
         return slots[i], (midnight + timedelta(minutes=30 * a)).timestamp(), \
             (midnight + timedelta(minutes=30 * b)).timestamp()
 
+    def planned_off(self, ts: float, ahead: float = WARN_BEFORE) -> bool | None:
+        """Whether the schedule expects no power now or within `ahead` seconds; None if unknown."""
+        if not self.configured:
+            return None
+        run = self.run_at(ts)
+        if not run or run[0] == "?":
+            return None
+        if run[0] == "0":
+            return True
+        nxt = self.run_at(run[2]) if run[2] - ts <= ahead else None
+        return bool(nxt and nxt[0] == "0")
+
     def upcoming_outage(self, now: float) -> tuple[float, float] | None:
         """(start, end) of a planned outage starting within WARN_BEFORE, warned once."""
         slots, i = self.slots_from(now)

@@ -20,8 +20,9 @@ DATA = widget.widget_data(1794139367, 1794139364, False, 1794133607, {"main": 10
 @pytest.mark.parametrize("module", [widget, widget_ios, widget_clock, widget_quick])
 def test_html_fits_telegram_limits(code, module):
     html = module.widget_html(lang(code), "Anker <SOLIX> C1000X")
-    # Telegram refuses more than 4096 compressed bytes; ~200 bytes of margin for zlib differences
-    assert len(html.encode()) <= 32768 and widget.compressed_size(html) <= 3900
+    # Telegram refuses more than 4096 bytes after zlib level 9, measured the same way as here
+    # (the widget-sandbox docs); keep ~100 bytes of margin
+    assert len(html.encode()) <= 32768 and widget.compressed_size(html) <= 4000
     assert "&lt;SOLIX&gt;" in html and "__" not in html
 
 
@@ -227,3 +228,32 @@ def test_back_to_status_from_quick_settings(qbot: FakeBot):
     qbot.press(qbot.ADMIN, "v:ios")
     calls = tap(qbot, "status")
     assert "CHARGE AT POWER-ON" in dict(calls)["sendWidget"]["html"]
+
+
+def test_widget_edits_only_on_change_and_pause_on_flood_control(wbot: FakeBot):
+    import urllib.error
+    from io import BytesIO
+    wbot.message(wbot.ADMIN, "📊 Status")
+    base = json.loads(DATA)
+    same = json.dumps(base | {"t": base["t"] + 15, "o": base["o"] - 2})  # time and a few watts only
+    wbot.tg.update_widgets(DATA)
+    wbot.tg.update_widgets(same)
+    assert [m for m, _ in wbot.calls].count("editMessageWidgetData") == 1
+    wbot.calls.clear()
+    wbot.tg.update_widgets(json.dumps(base | {"g": 1}))  # the grid came back: sent at once
+    assert [m for m, _ in wbot.calls] == ["editMessageWidgetData"]
+
+    def flood(method, params, timeout=10):
+        raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, BytesIO(
+            b'{"ok":false,"error_code":429,"parameters":{"retry_after":120}}'))
+    wbot.tg._call = flood
+    wbot.tg.update_widgets(json.dumps(base | {"g": 0}), force=True)
+    assert min(wbot.tg.widget_paused.values()) > __import__("time").time() + 100
+    assert wbot.tg._widgets()  # the widget is kept for later
+
+
+def test_status_press_is_deleted_with_a_widget(wbot: FakeBot):
+    wbot.tg._handle_update({"message": {"message_id": 77, "chat": {"id": int(wbot.ADMIN), "type": "private"},
+                                        "from": {"id": int(wbot.ADMIN)}, "text": "📊 Status"}}, wbot.handlers)
+    calls = wbot.drain()
+    assert ("deleteMessage", {"chat_id": wbot.ADMIN, "message_id": 77}) in calls

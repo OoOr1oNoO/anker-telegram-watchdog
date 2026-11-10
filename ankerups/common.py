@@ -20,7 +20,7 @@ REALTIME_TIMEOUT = 300  # seconds the device streams 0405 messages before the po
 HEALTHCHECK_EVERY = 300  # seconds between pings to HEALTHCHECK_URL
 
 
-IDLE_LOAD_W = 30  # output below this counts as "no load" for the full-battery outage confirm
+IDLE_LOAD_W = 15  # W: below this a full station may run its few watts from the battery with the grid up
 
 
 log = logging.getLogger("anker_ups")

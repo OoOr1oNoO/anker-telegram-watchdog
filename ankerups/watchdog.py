@@ -105,7 +105,8 @@ def show_popup(title: str, text: str) -> None:
 
 class Watchdog:
     def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, settings: Settings,
-                 name: str = "Anker", stats: Stats | None = None, full_confirm_s: float = 180):
+                 name: str = "Anker", stats: Stats | None = None, full_confirm_s: float = 180,
+                 idle_confirm_s: float = 600):
         self.name = name
         self.stats = stats
         self.tg = tg
@@ -115,6 +116,12 @@ class Watchdog:
         # so its AC input sits at 0 W for up to a minute at a time while the grid is up; in
         # that state an outage needs a longer run of 0 W (with a real load the input never drops)
         self.full_confirm_s = full_confirm_s
+        # ... and at night such a full idle station feeds the last few watts from the battery for
+        # up to ~6 minutes with the grid up: unless the schedule expects an outage now, wait longer.
+        # Stations that report the AC plug (plug_known) show the grid directly and never wait.
+        self.idle_confirm_s = idle_confirm_s
+        self.plug_known = False
+        self.planned_off: Callable[[float], bool | None] = lambda ts: None  # set by the app
         self.settings = settings
         self.on_battery: bool | None = None  # None until the first telemetry
         self.no_grid_since: float | None = None
@@ -196,8 +203,10 @@ class Watchdog:
 
         if self.no_grid_since is None:
             self.no_grid_since = now
-        idle_full = min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W
-        if not self.on_battery and now - self.no_grid_since >= (self.full_confirm_s if idle_full else self.confirm_s):
+        wait = self.confirm_s
+        if min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W and not self.plug_known:
+            wait = self.full_confirm_s if self.planned_off(time.time()) else max(self.full_confirm_s, self.idle_confirm_s)
+        if not self.on_battery and now - self.no_grid_since >= wait:
             self.on_battery = True
             resumed = self.stats.open_outage() if self.stats else None
             if resumed:

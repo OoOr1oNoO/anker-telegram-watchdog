@@ -26,7 +26,35 @@ from .widget import widget_html
 if TYPE_CHECKING:
     from .schedmenu import ScheduleMenu
 
-WIDGET_UPDATE_EVERY = 15  # seconds between widget data edits
+WIDGET_UPDATE_EVERY = 15  # seconds between checks for new widget data
+WIDGET_IDLE_EVERY = 60  # an unchanged widget still gets fresh data this often (times, minutes)
+MAX_RETRY_WAIT = 300  # flood control longer than this holds the alert instead of waiting
+RETRY_HELD_EVERY = 600  # Telegram's long holds often cover only some messages: try again this soon
+
+
+def _reply_keyboard(markup: str | None) -> bool:
+    return bool(markup) and '"keyboard"' in markup
+
+
+def retry_after(body: str) -> int | None:
+    """Seconds Telegram asks to wait in a 429 answer."""
+    try:
+        return int(json.loads(body)["parameters"]["retry_after"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def widget_core(payload: str) -> str:
+    """The widget data without the fields that change every time (timestamps, the minute)."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return payload
+    core = {k: v for k, v in data.items() if k not in ("t", "u", "m")}
+    for k, step in (("i", 10), ("o", 10), ("r", 0.5)):  # watts and hours wobble from reading to reading
+        if isinstance(core.get(k), (int, float)):
+            core[k] = round(core[k] / step) * step
+    return json.dumps(core, sort_keys=True)
 WIDGET_LIVE_FOR = 48 * 3600  # a status widget stops updating after this long
 
 
@@ -98,6 +126,13 @@ class Telegram:
         self.panel_button: Callable[[], str | None] = lambda: "btn_light"  # set by listen_commands
         self.awaiting: dict[tuple[str, str], tuple[str, float]] = {}  # (chat, user) -> (input, time)
         self.widget_lock = threading.Lock()
+        self.widget_last: dict[str, tuple[str, float]] = {}  # "chat|look" -> (data sent, when)
+        self.widget_paused: dict[str, float] = {}  # "chat|look" -> until when its edits are refused
+        self.blocked: dict[str, float] = {}  # chat -> when to try its held alerts again
+        self.widgets_blocked: dict[str, float] = {}  # "chat|look" -> until when new widgets are refused
+        self.keyboard_blocked: dict[str, float] = {}  # the same for messages with the reply keyboard
+        self.deferred: dict[str, list[str]] = {}  # texts held for a blocked chat
+        self.temps: Callable[[], dict] | None = None  # daily temperatures for the stats, set by the app
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
         elif not token:
@@ -188,24 +223,61 @@ class Telegram:
             except Exception:
                 log.exception("Telegram message rendering failed")
                 continue
-            self._deliver(kind, chat, args)
+            self._deliver(kind, chat, args, alert=target is None)
 
-    def _deliver(self, kind: str, chat: str, args: tuple) -> None:
+    def _blocked(self, chat: str, table: dict | None = None) -> bool:
+        return time.time() < (self.blocked if table is None else table).get(chat, 0)
+
+    def _defer(self, chat: str, kind: str, args: tuple, alert: bool) -> None:
+        """Keep an alert for a chat Telegram holds back (long flood control); sent once it lifts.
+        Replies to buttons are not kept: they would be stale by then."""
+        if alert and kind == "text" and len(self.deferred.setdefault(chat, [])) < 30:
+            self.deferred[chat].append(args[0])
+
+    def _flush_deferred(self) -> None:
+        for chat in [c for c, texts in self.deferred.items() if texts and not self._blocked(c)]:
+            texts = self.deferred.pop(chat)
+            L = self.lang_of(chat)
+            body = L.t("tg_held") + "\n\n" + "\n".join(texts)
+            log.info("Sending %d held messages to %s", len(texts), chat)
+            self._deliver("text", chat, (body[:4000], self.keyboard(L), True))
+
+    def _deliver(self, kind: str, chat: str, args: tuple, alert: bool = False) -> None:
         while True:
             try:
                 if kind == "photo":
                     self._send_photo(chat, *args)
                 else:
                     params = {"chat_id": chat, "text": args[0], "reply_markup": args[1]}
+                    if _reply_keyboard(args[1]) and self._blocked(chat, self.keyboard_blocked):
+                        del params["reply_markup"]
                     if args[2]:
                         params["entities"] = bold_first_line(args[0])
                     self._call("sendMessage", params)
                 return
             except urllib.error.HTTPError as exc:
-                if exc.code != 429 and exc.code < 500:
+                body = exc.read().decode(errors="replace")
+                if exc.code == 429:  # flood control: wait as long as Telegram says
+                    wait = retry_after(body) or 15
+                    if wait > MAX_RETRY_WAIT and kind == "text" and _reply_keyboard(args[1]) \
+                            and not self._blocked(chat, self.keyboard_blocked):
+                        # the block may cover only the reply keyboard (it follows the widget one):
+                        # the same message without it
+                        log.warning("Telegram refuses the reply keyboard in %s for %d s, sending without it",
+                                    chat, wait)
+                        self.keyboard_blocked[chat] = time.time() + wait
+                        continue
+                    if wait > MAX_RETRY_WAIT:
+                        log.error("Telegram holds a message to %s back for %d s, trying again later", chat, wait)
+                        self.blocked[chat] = time.time() + min(wait, RETRY_HELD_EVERY)
+                        self._defer(chat, kind, args, alert)
+                        return
+                    log.warning("Telegram send to %s: flood control, retrying in %d s", chat, wait)
+                    time.sleep(wait + 1)
+                    continue
+                if exc.code < 500:
                     # wrong id, bot blocked or removed from the group: retrying won't help
-                    log.warning("Telegram send to %s failed: %s %s", chat, exc.code,
-                                exc.read().decode(errors="replace")[:200])
+                    log.warning("Telegram send to %s failed: %s %s", chat, exc.code, body[:200])
                     return
                 log.warning("Telegram send failed (%s), retrying in 15s", exc)
             except Exception as exc:  # no internet during outage is expected
@@ -236,11 +308,16 @@ class Telegram:
                         style: str = "widget") -> None:
         params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L),
                   "allow_queries": "true"}  # the light / 12V buttons inside the widget
+        if self._blocked(f"{chat}|{style}", self.widgets_blocked):  # refused for now: the text status
+            self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
+            return
         try:
             message = self._call("sendWidget", params, timeout=20)["result"]
         except urllib.error.HTTPError as exc:
-            log.warning("sendWidget to %s failed: %s %s, sending text", chat, exc.code,
-                        exc.read().decode(errors="replace")[:200])
+            body = exc.read().decode(errors="replace")
+            log.warning("sendWidget to %s failed: %s %s, sending text", chat, exc.code, body[:200])
+            if exc.code == 429:
+                self.widgets_blocked[f"{chat}|{style}"] = time.time() + (retry_after(body) or 60)
             self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
             return
         with self.widget_lock:
@@ -264,8 +341,12 @@ class Telegram:
         if self.users:
             self.users.stats.meta("widgets", json.dumps(widgets))
 
-    def update_widgets(self, data: str, quick: str | None = None) -> None:
-        """Push new data to every live widget: the status data, or the quick settings data."""
+    def update_widgets(self, data: str, quick: str | None = None, force: bool = False) -> None:
+        """Push new data to every live widget: the status data, or the quick settings data.
+
+        Telegram counts every edit against the chat's flood limit (too many and it holds back the
+        alerts too), so a widget gets new data only when something it shows changed, or once a
+        minute for the clock-like fields; force (after a button press) skips that check."""
         with self.widget_lock:
             widgets = self._widgets()
         gone = []
@@ -278,10 +359,22 @@ class Telegram:
             if time.time() - sent > WIDGET_LIVE_FOR:
                 gone.append((key, message_id))
                 continue
+            if self._blocked(key, self.widget_paused):
+                continue
+            core = widget_core(payload)
+            last = self.widget_last.get(key)
+            if not force and last and last[0] == core and time.time() - last[1] < WIDGET_IDLE_EVERY:
+                continue
             try:
                 self._call("editMessageWidgetData", {"chat_id": chat, "message_id": message_id, "chat_data": payload})
+                self.widget_last[key] = (core, time.time())
             except urllib.error.HTTPError as exc:
                 text = exc.read().decode(errors="replace")
+                if exc.code == 429:
+                    wait = retry_after(text) or 60
+                    self.widget_paused[key] = time.time() + wait
+                    log.warning("Widget %s updates paused for %d s: flood control", key, wait)
+                    continue
                 if "not modified" not in text:
                     log.info("Status widget in %s no longer updated: %s %s", chat, exc.code, text[:120])
                     gone.append((key, message_id))
@@ -298,6 +391,8 @@ class Telegram:
     def _widget_loop(self, handlers: BotHandlers) -> None:
         while True:
             time.sleep(WIDGET_UPDATE_EVERY)
+            with contextlib.suppress(Exception):
+                self._flush_deferred()
             try:
                 info = handlers.widget() if handlers.widget else None
                 if info and self._widgets():
@@ -354,7 +449,8 @@ class Telegram:
             self.send_photo(lambda L: stats.chart_png(hours, L), lambda L: "📈 " + chart_title(L, hours) + "\n" + L.t(
                 "chart_energy", e_in=L.energy(e_in), cost=L.money(e_in * tariff), e_out=L.energy(e_out)), chat)
             return L.t("chart_sent")
-        rich = {"outages": (stats.outages_html, stats.outages_text),
+        temps = self.temps() if self.temps else None
+        rich = {"outages": (lambda L: stats.outages_html(L, temps=temps), stats.outages_text),
                 "energy": (lambda L: stats.energy_html(L, tariff), stats.energy_text),
                 "months": (lambda L: stats.months_html(L, tariff), stats.months_text)}
         if action in rich:
@@ -447,6 +543,9 @@ class Telegram:
                 self.send_widget(chat, h.widget, h.status, style)
             else:
                 self.reply(chat, h.status(L), title=True)
+        if action and msg.get("message_id"):  # the button press itself: the chat keeps only the answers
+            with contextlib.suppress(Exception):  # groups: only when the bot is an admin
+                self._call("deleteMessage", {"chat_id": chat, "message_id": msg["message_id"]})
 
     def _ask(self, chat: str, user: str, kind: str, h: BotHandlers) -> None:
         """Ask an admin for typed input (street, house) with a force-reply message."""
@@ -562,6 +661,8 @@ class Telegram:
                     self.reply(chat, h.status(ctx.L), title=True)
             elif not ctx.admin:
                 result = ctx.L.t("only_admins")
+            elif action == "qs" and self._blocked(f"{chat}|quick", self.widgets_blocked):  # no new widgets for now
+                self.reply(chat, *h.controller.render("root", ctx), title=True)
             elif action == "qs" and h.quick and h.widget and (info := h.widget()):  # open ⚙️ Quick settings
                 name = info[0]
                 self.send_widget(chat, lambda: (name, widget_quick.with_look(h.quick(), users.status_style(chat))),
@@ -577,7 +678,7 @@ class Telegram:
         except Exception as exc:
             log.warning("answerWidgetQuery failed: %s", exc)
         if h.widget and (info := h.widget()):
-            self.update_widgets(info[1], h.quick() if h.quick else None)  # the new state right away
+            self.update_widgets(info[1], h.quick() if h.quick else None, force=True)  # the new state now
 
     def _user_action(self, rest: str, ctx: Ctx, msg: dict, h: BotHandlers) -> str:
         """u:<action>:<id>[:m] from a request message or the Users menu (":m")."""

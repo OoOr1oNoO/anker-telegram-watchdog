@@ -44,6 +44,7 @@ body{margin:12px 14px}
 <div class=tr id=at><div class=bg></div><div class=fl id=af></div><div class=kn id=a1></div><div class=kn id=a2></div></div>
 <div class=tk><i>12</i><i>16</i><i>20</i><i>00</i><i>04</i></div></div>
 <div class=cd><span class=k>📊 __LOOK__</span><div class=sg id=sg></div></div>
+<div class=s style="margin-top:8px;text-align:right">Open-Meteo · NEPTUN</div>
 <script>
 var L=__LABELS__,W=TelegramWidget,$=function(i){return document.getElementById(i)},D={},S={},busy=0;
 var SV="<svg viewBox='0 0 24 24' width='26' height='26' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>",

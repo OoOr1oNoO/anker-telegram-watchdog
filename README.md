@@ -15,6 +15,11 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   grid → battery → home picture) and Clock (a 24-hour dial with the schedule and the actual grid,
   the time or the charge in LCD digits); Text for Telegram apps without widgets. A new status
   replaces the previous widget of the same look in the chat
+- Weather and air quality ([Open-Meteo](https://open-meteo.com)) and air-raid alerts
+  ([NEPTUN](https://neptun.in.ua), with the yellow (drones) / red (missiles) level; the
+  ubilling.net.ua feed as a fallback), no keys needed: the temperature, AQI and an alert badge in
+  the status widget, the day's temperature and alert hours in the outages table (`LATITUDE`,
+  `LONGITUDE`, `ALERT_REGION`, `ALERT_NEAR` in `.env`)
 - **⚙️ Quick settings** widget (the gear button in the status widget): light, DC 12V, fast
   charging and display tiles, the AC input limit as a slider, the auto light hours as a
   two-handle range and the status look
