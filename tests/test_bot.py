@@ -205,3 +205,17 @@ def test_every_keyboard_press_is_deleted(bot: FakeBot):
         calls = press(text)
         assert [m for m, _ in calls].count("deleteMessage") == 1 and texts(calls, "sendMessage")
     assert "deleteMessage" not in [m for m, _ in press("hello")]
+
+
+def test_outage_alerts_collapse_into_one_summary(bot: FakeBot):
+    bot.tg.send(lambda L: "Planned outage soon", thread="outage")
+    bot.tg.send(lambda L: "Grid lost", thread="outage")
+    lost = [p["message_id"] if "message_id" in p else None for m, p in bot.drain()]
+    assert lost == [None] * len(lost)  # sendMessage calls only
+    bot.tg.send(lambda L: "Grid back", rich=lambda L: "<h3>Grid back</h3>", end="outage")
+    calls = bot.drain()
+    methods = [m for m, _ in calls]
+    assert methods.count("sendRichMessage") == 2  # admin and group
+    deleted = sorted(p["message_id"] for m, p in calls if m == "deleteMessage")
+    assert deleted == [101, 102, 103, 104]  # both alerts in both chats
+    assert bot.users.stats.meta("thread_outage") == "{}"

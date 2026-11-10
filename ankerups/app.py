@@ -34,7 +34,7 @@ from anker_solix_api.api import AnkerSolixApi
 from anker_solix_api.mqtt_factory import SolixMqttDeviceFactory
 from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
-from .bot import BotHandlers, Telegram
+from .bot import BotHandlers, Telegram, card
 from .common import (
     HEALTHCHECK_EVERY,
     IS_WINDOWS,
@@ -50,7 +50,7 @@ from .menus import STATION_CONTROLS, Controller, Ctx, in_window
 from .stats import Settings, Stats, chart_title, merge_slot
 from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
-from .schedule import Day, Schedule, run_schedule, windows_text
+from .schedule import Day, Schedule, hhmm, run_schedule, windows, windows_text
 from .watchdog import LoadPeaks, PowerPlan, Watchdog, battery_state
 from .extras import Extras
 from .widget import MAX_OUTPUT, widget_data
@@ -97,7 +97,8 @@ def send_daily_summary(tg: Telegram, stats: Stats | None, at: str) -> None:
     if now.strftime("%H:%M") < at or stats.meta("last_summary") == now.strftime("%Y-%m-%d"):
         return
     stats.meta("last_summary", now.strftime("%Y-%m-%d"))
-    tg.send(lambda L: stats.summary_text(now, L))
+    tg.send(lambda L: stats.summary_text(now, L), rich=lambda L: stats.summary_card(now, L),
+            thread="daily", end="daily")
 
     def chart(L: Lang) -> bytes | None:
         with contextlib.suppress(Exception):
@@ -156,7 +157,19 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
             if kind == "restored":
                 return L.t("al_sched_restored", day=day_name, group=group, v=v)
             return L.t("al_sched_change", day=day_name, group=group, v=v)
-        tg.send(text)
+
+        def rich(L: Lang) -> str:  # the title, then the outages as a table: the window and how long
+            title, _, rest = text(L).partition(": ")
+            if kind == "emergency":
+                return card(title, note=rest)
+            rows = [(f"{mark} {hhmm(a)}–{hhmm(b)}", L.dur((b - a) * 60))
+                    for state, mark in (("0", "🔴"), ("?", "🟡")) for a, b in windows(day.slots, state)]
+            rows.sort(key=lambda r: r[0][2:])
+            off = sum((b - a) * 60 for a, b in windows(day.slots))
+            if not rows:
+                return card(title, note=L.t("sc_no_off"))
+            return card(title, rows + [("⏱ " + L.t("t_off"), L.dur(off))])
+        tg.send(text, rich=rich, thread="sched", end="sched")  # the newest schedule news only
 
     def on_soon(start: float, end: float) -> None:
         if not settings.flag("alert_sched_soon"):
@@ -167,7 +180,10 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
         until = time.strftime("%H:%M", time.localtime(end)) if end - start < 86400 else "?"
         extra, markup = hint(start) if hint else ((lambda L: ""), None)
         tg.send(lambda L: L.t("al_sched_soon", start=at, mins=mins, end=until,
-                              charge=L.charge(lv) if lv else "?") + extra(L), markup)
+                              charge=L.charge(lv) if lv else "?") + extra(L), markup, thread="outage",
+                rich=lambda L: card(L.t("c_soon", mins=mins), [("🕐 " + L.t("r_window"), f"{at} – {until}"),
+                                                               ("🔋 " + L.t("t_charge"), L.charge(lv) if lv else "?")],
+                                    extra(L)))
 
     threading.Thread(target=run_schedule, args=(schedule, on_event, on_soon), daemon=True).start()
 
@@ -187,12 +203,12 @@ def autolight_step(watchdog: Watchdog, controller: Controller, settings: Setting
             return
         if controller.act("dc", "1", ctx)[0] != tg.default.t("cmd_failed"):
             meta("autolight", "on")
-            tg.send(lambda L: L.t("al_auto_on"))
+            tg.send(lambda L: L.t("al_auto_on"), thread="outage", rich=lambda L: card(L.t("al_auto_on")))
     elif not want and state:
         meta("autolight", "")
         if state == "on" and controller.widget_controls()[1] == 1:
             controller.act("dc", "0", ctx)
-            tg.send(lambda L: L.t("al_auto_off"))
+            tg.send(lambda L: L.t("al_auto_off"), thread="outage", rich=lambda L: card(L.t("al_auto_off")))
 
 
 def run_autolight(watchdog: Watchdog, controller: Controller, settings: Settings, tg: Telegram,
@@ -377,7 +393,8 @@ async def run(args: argparse.Namespace) -> None:
                 link_alerted = True
                 if settings.flag("alert_link"):
                     seconds = int(silent)
-                    tg.send(lambda L: L.t("al_nodata", s=seconds))
+                    tg.send(lambda L: L.t("al_nodata", s=seconds), thread="data",
+                            rich=lambda L: card(L.t("al_nodata", s=seconds)))
             # The device stops streaming after some state changes (e.g. grid coming back),
             # so ask for realtime data again as soon as the usual 3-5 s cadence breaks.
             if (session and session.is_connected() and silent > args.retrigger
@@ -415,11 +432,12 @@ async def run(args: argparse.Namespace) -> None:
                 if levels and packs != expansion:
                     if expansion is not None and settings.flag("alert_expansion"):
                         key = "al_exp_on" if packs > expansion else "al_exp_off"
-                        tg.send(lambda L, key=key, lv=levels: L.t(key, charge=L.charge(lv)))
+                        tg.send(lambda L, key=key, lv=levels: L.t(key, charge=L.charge(lv)), thread="exp", end="exp",
+                                rich=lambda L, key=key, lv=levels: card(L.t(key, charge=L.charge(lv))))
                     expansion = packs
                 if link_alerted:
                     if settings.flag("alert_link"):
-                        tg.send(lambda L: L.t("al_data_back"))
+                        tg.send(lambda L: L.t("al_data_back"), thread="data", end="data", rich=lambda L: card(L.t("al_data_back")))
                     link_alerted = False
                 if levels and ac_in is not None:
                     last_levels = levels

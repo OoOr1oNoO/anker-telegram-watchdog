@@ -73,7 +73,7 @@ class Station:
 
 
 def autolight(settings, station, on_battery, hour, meta, sent):
-    tg = SimpleNamespace(default=EN, send=lambda render: sent.append(render(EN)))
+    tg = SimpleNamespace(default=EN, send=lambda render, *a, **k: sent.append(render(EN)))
     autolight_step(SimpleNamespace(on_battery=on_battery), station, settings, tg, lambda k, v=None: (
         meta.__setitem__(k, v) if v is not None else meta.get(k)), datetime(2026, 11, 8, hour))
 
@@ -108,7 +108,7 @@ def test_thresholds_survive_a_restart_in_an_outage(stats, settings, monkeypatch)
     clock = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     sent = []
-    tg = SimpleNamespace(default=EN, send=lambda render: sent.append(render(EN)))
+    tg = SimpleNamespace(default=EN, send=lambda render, *a, **k: sent.append(render(EN)))
     power = SimpleNamespace(power_saver=lambda: None, restore=lambda: None)
 
     def feed(w, levels, seconds=40):

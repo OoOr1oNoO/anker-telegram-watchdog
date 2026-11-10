@@ -71,11 +71,13 @@ def test_tariff_and_peak_settings(bot: FakeBot, settings):
 @pytest.fixture
 def peaks(settings):
     sent = []
-    tg = SimpleNamespace(send=lambda render, markup=None: sent.append(render(EN)))
+    cards: list[str] = []
+    tg = SimpleNamespace(send=lambda render, markup=None, rich=None, **k: (
+        sent.append(render(EN)), rich and cards.append(rich(EN))))
     settings.set("peak_mode", "both")
     settings.set("peak_w", "1000")
     p = LoadPeaks(tg, settings)
-    p.sent = sent
+    p.sent, p.cards = sent, cards
     return p
 
 
@@ -93,6 +95,7 @@ def test_peak_start_and_end_with_energy(peaks):
     assert len(peaks.sent) == 2
     assert peaks.sent[0].startswith("🔥 High load 2000 W since")
     assert "up to 2000 W: " in peaks.sent[1] and "Wh ≈ " in peaks.sent[1] and "UAH" in peaks.sent[1]
+    assert "<td>⚡ Peak</td><td>2000 W</td>" in peaks.cards[1] and "UAH" in peaks.cards[1]
 
 
 def test_peak_summary_only_and_short_spikes_ignored(peaks, settings):
@@ -129,3 +132,10 @@ def test_limit_button_under_an_alert_keeps_the_alert(bot: FakeBot):
     calls = bot.press(bot.ADMIN, "a:limit:600@alert")
     assert toast(calls) == "600W ✓" and sent == [{"max_watts": 600}]
     assert "editMessageText" not in dict(calls)
+
+
+def test_daily_summary_card(stats):
+    from datetime import datetime
+    fill(stats, 5, 100, 50, 60, 60)
+    html = stats.summary_card(datetime.now(), EN)
+    assert html.startswith("<h3>📅 Last 24 h</h3><table bordered>") and "avg" in html and "<footer>" in html

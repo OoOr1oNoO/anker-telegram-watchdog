@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 
-from .bot import Telegram
+from .bot import Telegram, card
 from .common import IDLE_LOAD_W, IS_WINDOWS, POWER_SAVER_GUID, as_int, data_dir, log
 from .i18n import Lang
 from .stats import Settings, Stats
@@ -175,8 +175,16 @@ class Watchdog:
             if self.on_battery:
                 if self.settings.flag("alert_outage"):
                     off, at = self.outage_seconds(), time.time()
+                    start, soc = self.outage_started, self.stats.open_outage_soc() if self.stats else None
+
+                    def summary(L: Lang) -> str:  # one message per outage: the alerts before it go
+                        return card(L.t("al_back_t", dur=L.dur(off) if off else "?"), [
+                            ("🔌 " + L.t("ob_outage"), f"{hm(start)} → {hm(at)}" if start else hm(at)),
+                            ("🔋 " + L.t("t_charge"), (f"{soc}% → " if soc is not None else "") + L.charge(levels))],
+                            self.note(L, "back", at))
                     self.tg.send(lambda L: L.t("al_back", dur=L.dur(off) if off else "?",
-                                               charge=L.charge(levels)) + self.note(L, "back", at))
+                                               charge=L.charge(levels)) + self.note(L, "back", at),
+                                 rich=summary, end="outage")
                 if self.stats:
                     self.stats.outage_ended(time.time(), total)
                 if min(levels.values()) < 100:  # nothing to report after a short outage
@@ -185,7 +193,9 @@ class Watchdog:
                 # once per outage: the station hovers 99-100 % when full, so no repeats
                 if self.settings.flag("alert_full"):
                     took = time.time() - self.charge_pending
-                    self.tg.send(lambda L: L.t("al_full", dur=L.dur(took), charge=L.charge(levels)))
+                    self.tg.send(lambda L: L.t("al_full", dur=L.dur(took), charge=L.charge(levels)), thread="outage",
+                                 rich=lambda L: card(L.t("c_full"), [("🔋 " + L.t("t_charge"), L.charge(levels)),
+                                                                     ("⏱ " + L.t("r_took"), L.dur(took))]))
                 self._set_charge_pending(None)
             if self.on_battery is not False:
                 # also on the first reading, in case we were restarted during an outage
@@ -200,6 +210,9 @@ class Watchdog:
 
         def left(L: Lang) -> str:
             return L.t("al_left", dur=L.dur(remaining_h * 3600)) if remaining_h else ""
+
+        def left_row(L: Lang) -> list[tuple[str, str]]:
+            return [("⏳ " + L.t("r_left"), "~" + L.dur(remaining_h * 3600))] if remaining_h else []
 
         if self.no_grid_since is None:
             self.no_grid_since = now
@@ -229,10 +242,15 @@ class Watchdog:
                            if time.time() - self.outage_started >= 60 else None)
                 if self.settings.flag("alert_outage"):
                     at = self.outage_started
+
+                    def lost(L: Lang) -> str:
+                        return card(L.t("c_lost"), [("🕐 " + L.t("r_since"), hm(at)),
+                                                    ("🔋 " + L.t("t_charge"), L.charge(levels)), *left_row(L)]
+                                    + ([("⚡ " + L.t("r_up"), L.dur(up))] if up else []), self.note(L, "lost", at))
                     self.tg.send(lambda L: L.t("al_lost", name=name, charge=L.charge(levels), left=left(L),
                                                since=L.t("al_since", time=started) if started else "",
                                                uptime=L.t("al_uptime", dur=L.dur(up)) if up else "")
-                                 + self.note(L, "lost", at))
+                                 + self.note(L, "lost", at), thread="outage", rich=lost)
                 if self.stats:
                     self.stats.outage_started(self.outage_started, total)
             self.power.power_saver()
@@ -247,12 +265,18 @@ class Watchdog:
                     fired.update(x for x in self.settings.thresholds if x >= t)
                     self._save_fired()
                     self.tg.send(lambda L, key=key, pct=pct, t=t: L.t(
-                        "al_threshold", name=L.battery(key), pct=pct, t=t, charge=L.charge(levels), left=left(L)))
+                        "al_threshold", name=L.battery(key), pct=pct, t=t, charge=L.charge(levels), left=left(L)),
+                        thread="outage", rich=lambda L, key=key, pct=pct, t=t: card(
+                            L.t("c_threshold", pct=pct) + (f" · {L.battery(key)}" if len(levels) > 1 else ""),
+                            [("🔋 " + L.t("t_charge"), L.charge(levels)), *left_row(L),
+                             ("🎯 " + L.t("r_threshold"), f"{t}%")]))
             critical = self.settings.critical
             if critical and total <= critical and not self.critical_fired:
                 self.critical_fired = True
                 self._save_fired()
-                self.tg.send(lambda L: L.t("al_critical", charge=L.charge(levels), left=left(L)))
+                self.tg.send(lambda L: L.t("al_critical", charge=L.charge(levels), left=left(L)), thread="outage",
+                             rich=lambda L: card(L.t("c_critical"), [("🔋 " + L.t("t_charge"), L.charge(levels)),
+                                                                     *left_row(L)], L.t("al_critical_note")))
                 L = self.tg.default
                 show_popup(L.t("popup_title", name=name),
                            L.t("popup_text", charge=L.charge(levels), left=left(L)))
@@ -275,6 +299,10 @@ def battery_state(data: dict) -> tuple[dict[str, int] | None, int]:
         return {"main": main}, packs
     return {"main": main} | {("expansion" if len(exps) == 1 else f"expansion {i}"): e
                              for i, e in enumerate(exps, 1)}, packs
+
+
+def hm(ts: float) -> str:
+    return time.strftime("%H:%M", time.localtime(ts))
 
 
 class LoadPeaks:
@@ -315,7 +343,9 @@ class LoadPeaks:
                 self.below_since = None
                 if mode == "both":
                     at, w = time.strftime("%H:%M", time.localtime(self.start)), out
-                    self.tg.send(lambda L: L.t("al_peak_start", w=w, t=at))
+                    self.tg.send(lambda L: L.t("al_peak_start", w=w, t=at), thread="peak",
+                                 rich=lambda L: card(L.t("c_peak"), [("🕐 " + L.t("r_since"), at),
+                                                                     ("⚡ " + L.t("r_load"), f"{w} W")]))
             return
         self.wh += out * (now - self.last) / 3600
         self.last = now
@@ -331,6 +361,9 @@ class LoadPeaks:
         self.start = self.above_since = self.below_since = None
         log.info("High load %s-%s, up to %d W, %.3f kWh", time.strftime("%H:%M", time.localtime(start)),
                  time.strftime("%H:%M", time.localtime(end)), w, kwh)
-        self.tg.send(lambda L: L.t("al_peak_end", start=time.strftime("%H:%M", time.localtime(start)),
-                                   end=time.strftime("%H:%M", time.localtime(end)), dur=L.dur(max(60, end - start)),
-                                   w=w, e=L.energy(kwh), cost=L.money(kwh * tariff)))
+        self.tg.send(lambda L: L.t("al_peak_end", start=hm(start), end=hm(end), dur=L.dur(max(60, end - start)),
+                                   w=w, e=L.energy(kwh), cost=L.money(kwh * tariff)), end="peak",
+                     rich=lambda L: card(L.t("c_peak"), [
+                         ("🕐 " + L.t("r_time"), f"{hm(start)}–{hm(end)} ({L.dur(max(60, end - start))})"),
+                         ("⚡ " + L.t("r_peak"), f"{w} W"), ("🔋 " + L.t("r_energy"), L.energy(kwh)),
+                         ("💰 " + L.t("t_cost"), L.money(kwh * tariff))]))

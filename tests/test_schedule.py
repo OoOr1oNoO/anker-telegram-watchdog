@@ -220,3 +220,23 @@ def test_planned_off_now_or_soon(schedule):
     assert schedule.planned_off(at(10)) is True
     assert schedule.planned_off(at(8, 45)) is True  # 15 min before
     assert schedule.planned_off(at(7)) is False
+
+
+def test_schedule_news_is_a_table_of_outages(schedule, settings, monkeypatch):
+    from types import SimpleNamespace
+
+    from ankerups import app
+    started, cards = [], []
+    monkeypatch.setattr(app.threading, "Thread", lambda target, args, daemon: SimpleNamespace(
+        start=lambda: started.append(args)))
+    tg = SimpleNamespace(default=lang("en"), send=lambda render, *a, rich=None, **k: cards.append(rich(lang("en"))))
+    schedule.set("kyiv", "52.1", "x")
+    app.start_schedule(tg, schedule, settings, lambda: None)
+    on_event = started[0][1]
+    slots = "0" * 2 + "1" * 6 + "?" * 2 + "1" * 30 + "0" * 8
+    on_event("restored", sch.Day(DATE, slots, "ok"))
+    html = cards[0]
+    assert html.startswith("<h3>📅 The schedule applies again")
+    assert "<td>🔴 00:00–01:00</td><td>1h 00m</td>" in html and "<td>🟡 04:00–05:00</td>" in html
+    assert html.index("00:00–01:00") < html.index("04:00–05:00") < html.index("20:00–24:00")
+    assert "<td>⏱ No grid</td><td>5h 00m</td>" in html

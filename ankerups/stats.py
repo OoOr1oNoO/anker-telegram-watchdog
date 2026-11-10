@@ -84,6 +84,10 @@ class Stats:
         rows = self._exec("SELECT start FROM outages WHERE end IS NULL ORDER BY start DESC LIMIT 1")
         return rows[0][0] if rows else None
 
+    def open_outage_soc(self) -> int | None:
+        rows = self._exec("SELECT soc_start FROM outages WHERE end IS NULL ORDER BY start DESC LIMIT 1")
+        return rows[0][0] if rows else None
+
     def outage_started(self, start: float, soc: int) -> None:
         if self.open_outage() is None:
             self._exec("INSERT INTO outages (start, soc_start) VALUES (?, ?)", (int(start), soc))
@@ -259,6 +263,24 @@ class Stats:
             L.t("sum_outages", n=len(outages), dur=L.dur(off)),
             L.t("sum_load", avg=f"{avg_out:.0f}", peak=f"{max_out:.0f}"),
             L.t("sum_energy", e_in=L.energy(sum_in * 60 / 3.6e6), e_out=L.energy(sum_out * 60 / 3.6e6))])
+
+    def summary_card(self, end: datetime, L: Lang, hours: int = 24) -> str:
+        """The daily summary as a rich message."""
+        from .bot import card  # noqa: PLC0415 - bot imports stats
+
+        start = end - timedelta(hours=hours)
+        rows = self._exec("SELECT AVG(out), MAX(out), SUM(ac_in), SUM(out) FROM samples "
+                          "WHERE ts >= ? AND ts < ?", (int(start.timestamp()), int(end.timestamp())))
+        avg_out, max_out, sum_in, sum_out = rows[0]
+        if avg_out is None:
+            return card(L.t("sum_nodata", hours=hours))
+        outages = self.outages_between(start.timestamp(), end.timestamp())
+        off = sum(min(e, end.timestamp()) - max(s, start.timestamp()) for s, e, *_ in outages)
+        return card(L.t("c_summary", hours=hours), [
+            ("🔌 " + L.t("t_outages"), str(len(outages))), ("⏱ " + L.t("t_off"), L.dur(off)),
+            ("⚡ " + L.t("r_load"), L.t("r_avg_peak", avg=f"{avg_out:.0f}", peak=f"{max_out:.0f}")),
+            ("⬇️ " + L.t("r_in"), L.energy(sum_in * 60 / 3.6e6)), ("⬆️ " + L.t("r_out"), L.energy(sum_out * 60 / 3.6e6))],
+            f"{start:%d.%m %H:%M} – {end:%d.%m %H:%M}")
 
     def chart_png(self, hours: int, L: Lang, end: float | None = None) -> bytes | None:
         import matplotlib  # noqa: PLC0415 - heavy, only needed for charts

@@ -32,6 +32,19 @@ MAX_RETRY_WAIT = 300  # flood control longer than this holds the alert instead o
 RETRY_HELD_EVERY = 600  # Telegram's long holds often cover only some messages: try again this soon
 
 
+def card(title: str, rows: list[tuple[str, str]] | tuple = (), note: str = "") -> str:
+    """An alert as a rich message: a title, a two-column table, a note under it."""
+    html = f"<h3>{_esc(title)}</h3>"
+    if rows:
+        html += "<table bordered>" + "".join(f"<tr><td>{_esc(a)}</td><td>{_esc(b)}</td></tr>"
+                                            for a, b in rows) + "</table>"
+    return html + (f"<footer>{_esc(note.strip())}</footer>" if note.strip() else "")
+
+
+def _esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _reply_keyboard(markup: str | None) -> bool:
     return bool(markup) and '"keyboard"' in markup
 
@@ -167,12 +180,18 @@ class Telegram:
     def keyboard(self, L: Lang) -> str:
         return main_keyboard(L, self.panel_button())
 
-    def send(self, render: Render, markup: Render | None = None) -> None:
-        """Alert to all active chats, each in its language; markup: inline buttons under it."""
+    def send(self, render: Render, markup: Render | None = None, thread: str | None = None,
+             rich: Render | None = None, end: str | None = None) -> None:
+        """Alert to all active chats, each in its language; markup: inline buttons under it.
+
+        rich: the alert as a rich message (a card, see card()), the text is its fallback.
+        Runs of alerts keep the chat clean: thread ("outage") adds the alert to a run, end deletes
+        the run's earlier alerts once this one is sent (with the same thread: it replaces them)."""
         log.info("ALERT: %s", render(lang("en")))
         if self.enabled:
             stamp = time.strftime("%H:%M:%S")
-            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", markup, None, None, False))
+            self.queue.put(("text", lambda L: f"{stamp} {render(L)}", markup, None, None, False,
+                            {"thread": thread, "rich": rich, "end": end}))
 
     def reply(self, chat: str, text: str | Render, markup: str | Render | None = None,
               code: str | None = None, title: bool = False) -> None:
@@ -189,8 +208,11 @@ class Telegram:
         while True:
             self._process(*self.queue.get())
 
-    def _process(self, kind: str, payload, extra, target: str | None, code: str | None, title: bool) -> None:
+    def _process(self, kind: str, payload, extra, target: str | None, code: str | None, title: bool,
+                 opts: dict | None = None) -> None:
         """Render one queued message for each chat in its language and send it."""
+        opts = opts or {}
+        thread, rich, end = opts.get("thread"), opts.get("rich"), opts.get("end")
         chats = [target] if target else (self.users.recipients() if self.users else [])
         photos: dict[str, bytes | None] = {}  # one chart per language
         for chat in chats:
@@ -224,7 +246,37 @@ class Telegram:
             except Exception:
                 log.exception("Telegram message rendering failed")
                 continue
-            self._deliver(kind, chat, args, alert=target is None)
+            sent = None
+            if rich and not self._blocked(chat):
+                try:
+                    sent = self._call("sendRichMessage", {"chat_id": chat, "reply_markup": args[1],
+                                                          "rich_message": json.dumps({"html": rich(L)})})["result"]
+                except Exception as exc:
+                    log.warning("Rich alert to %s failed (%s), sending text", chat, exc)
+            if sent is None:
+                sent = self._deliver(kind, chat, args, alert=target is None)
+            if sent is not None:
+                if end:
+                    self._thread(chat, end, end=True)
+                if thread:
+                    self._thread(chat, thread, add=sent.get("message_id"))
+
+    def _thread(self, chat: str, name: str, add: int | None = None, end: bool = False) -> None:
+        """Message ids of a run of alerts per chat (kept in the DB); end deletes them."""
+        if not self.users:
+            return
+        key = f"thread_{name}"
+        try:
+            saved = json.loads(self.users.stats.meta(key) or "{}")
+        except ValueError:
+            saved = {}
+        if add:
+            saved.setdefault(chat, []).append(add)
+        if end:
+            for message_id in saved.pop(chat, []):
+                with contextlib.suppress(Exception):  # older than 48 h or already gone
+                    self._call("deleteMessage", {"chat_id": chat, "message_id": message_id})
+        self.users.stats.meta(key, json.dumps(saved))
 
     def _blocked(self, chat: str, table: dict | None = None) -> bool:
         return time.time() < (self.blocked if table is None else table).get(chat, 0)
@@ -243,19 +295,19 @@ class Telegram:
             log.info("Sending %d held messages to %s", len(texts), chat)
             self._deliver("text", chat, (body[:4000], self.keyboard(L), True))
 
-    def _deliver(self, kind: str, chat: str, args: tuple, alert: bool = False) -> None:
+    def _deliver(self, kind: str, chat: str, args: tuple, alert: bool = False) -> dict | None:
+        """Send a message (retrying network errors); returns the sent message, None if not sent."""
         while True:
             try:
                 if kind == "photo":
                     self._send_photo(chat, *args)
-                else:
-                    params = {"chat_id": chat, "text": args[0], "reply_markup": args[1]}
-                    if _reply_keyboard(args[1]) and self._blocked(chat, self.keyboard_blocked):
-                        del params["reply_markup"]
-                    if args[2]:
-                        params["entities"] = bold_first_line(args[0])
-                    self._call("sendMessage", params)
-                return
+                    return None
+                params = {"chat_id": chat, "text": args[0], "reply_markup": args[1]}
+                if _reply_keyboard(args[1]) and self._blocked(chat, self.keyboard_blocked):
+                    del params["reply_markup"]
+                if args[2]:
+                    params["entities"] = bold_first_line(args[0])
+                return self._call("sendMessage", params).get("result")
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode(errors="replace")
                 if exc.code == 429:  # flood control: wait as long as Telegram says

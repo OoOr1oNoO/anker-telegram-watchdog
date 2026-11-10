@@ -22,8 +22,10 @@ def run(monkeypatch, stats, settings):
     class TG:
         default = lang("en")
 
-        def send(self, render):
+        def send(self, render, markup=None, thread=None, rich=None, end=None):
             sent.append((int(clock.t - 1000), render(lang("en"))))
+            if rich:  # the cards render too
+                assert rich(lang("en")).startswith("<h3>")
 
     class Power:
         def power_saver(self): ...
