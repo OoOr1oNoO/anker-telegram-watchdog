@@ -34,6 +34,9 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light).
   **💡 Auto light**: during an outage in the evening (17–23, 18–24, 18–01 or your own hours)
   the bot turns the 12V output on, and off again when the power is back or the hours end
+- Optional **🔌 Tuya / Smart Life plug** (e.g. a fridge or a PC behind it): on / off, a timer and an
+  on/off cycle from the 🔦 panel, its load and voltage in the status widget and an on/off button
+  there; needs a free Tuya IoT cloud project with your Smart Life account linked (`TUYA_*` in `.env`)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days (with the energy and
   its cost), and tables: outages by day, outages and energy by month, energy through the station
   (kWh in / out and the cost at your tariff, 4.32 UAH/kWh by default), and load sessions (long

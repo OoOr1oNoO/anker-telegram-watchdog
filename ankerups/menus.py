@@ -9,7 +9,8 @@ from dataclasses import dataclass
 
 from .common import as_int, log
 from .i18n import Lang, lang
-from .stats import Settings
+from .plug import decode_cycle, parse_cycle
+from .stats import Settings, esc
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, STATUS_STYLES, Users
 from .widget_quick import quick_data
@@ -97,7 +98,10 @@ def paint(rows: list[list[dict]]) -> list[list[dict]]:
 
 # settings typed in by an admin after ✏️: key -> (prompt, "could not read it", menu to show)
 TEXT_SETTINGS = {"autolight": ("al_auto_ask", "al_auto_bad", "light"),
-                 "tariff": ("tf_ask", "tf_bad", "notif")}
+                 "tariff": ("tf_ask", "tf_bad", "notif"),
+                 "plugcycle": ("pl_ask", "pl_bad", "plug")}
+PLUG_TIMERS = [30, 60, 120, 240]  # minutes: the plug switches over when the countdown ends
+PLUG_CYCLES = ["10/10", "15/15", "20/10", "30/30"]
 PEAK_MODES = ["", "both", "end"]  # high load alerts: off, start and end, only the end
 PEAK_CHOICES = [500, 1000, 1500, 2000]
 
@@ -161,6 +165,7 @@ class Controller:
         self.sched = None  # ScheduleMenu, set by the app when Telegram is on
         self.widgets = False  # 📊 Status can be a widget: show the widget / text switch
         self.pending: dict[str, tuple[str, float]] = {}  # field -> (value, time) until telemetry catches up
+        self.plug = None  # plug.Plug (Tuya smart plug), set by the app when .env has it
 
     def _state(self, key: str) -> str | None:
         field = STATION_CONTROLS[key][0]
@@ -205,6 +210,8 @@ class Controller:
         key, _, value = action.partition(":")
         if key in ("light", "dc"):
             return self.toggle(key, ctx)
+        if key == "plug" and self.plug:  # the Tuya plug on <-> off
+            return self._plug_act("off" if (self.plug.status() or {}).get("switch_1") else "on", ctx)[0]
         if key == "fast" and self._supported("fast"):
             return self.act("fast", "0" if self._state("fast") == "1" else "1", ctx)[0]
         if key == "disp" and self._supported("disp"):
@@ -237,6 +244,14 @@ class Controller:
             if not span:
                 return None
             value = "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
+        elif kind == "plugcycle":
+            cycle = parse_cycle(text) if self.plug else None
+            if not cycle:
+                return None
+            work, rest, start, end = cycle
+            ok = self.plug.set_cycle(True, work, rest, start, end)
+            log.info("Plug cycle %s by %s: %s", text.strip(), ctx.user, "ok" if ok else "failed")
+            return self.render("plug", ctx)
         elif kind == "tariff":
             try:
                 price = float(text.strip().replace(",", ".").split()[0])
@@ -296,7 +311,12 @@ class Controller:
                               "callback_data": f"a:autolight:{c or 'off'}@light"} for c in AUTOLIGHT_CHOICES]
                             + [{"text": ("•" if auto not in AUTOLIGHT_CHOICES else "") + "✏️",
                                 "callback_data": "a:autolight:edit"}])
+            if self.plug:
+                rows.append([{"text": "🔌 " + L.t("plug"), "callback_data": "m:plug"}])
+                lines = lines or ["🔌 " + L.t("plug")]
             return "\n".join(lines or [L.t("no_light")]), self._markup(L, rows, back=None)
+        if menu == "plug" and self.plug:
+            return self._render_plug(L)
         if menu == "notif":
             th = st.thresholds
             on_off = {True: L.t("on"), False: L.t("off")}
@@ -429,6 +449,108 @@ class Controller:
                 rows[0].insert(0, {"text": L.t(toggle[0]), "callback_data": f"u:{toggle[1]}:{chat}"})
         return text, self._markup(L, rows, back="m:users")
 
+    def rich(self, menu: str, ctx: Ctx) -> str | None:
+        """A menu shown as a rich message (a card with a table), None for the plain text ones."""
+        if menu == "plug" and self.plug:
+            return self._plug_card(ctx.L)
+        if menu == "light":
+            return self._light_card(ctx.L)
+        return None
+
+    def _light_card(self, L: Lang) -> str | None:
+        """The light, DC 12V, auto light and the plug in one table."""
+        rows = []
+        if self._supported("light"):
+            rows.append(L.t("light_title", v=self._label("light", L)).split(": ", 1))
+        if self._supported("dc"):
+            rows.append(("🔌 12V", self._label("dc", L)))
+            rows.append(L.t("al_auto_line", v=window_text(L, self.settings.get("autolight"))).split(": ", 1))
+        if self.plug and (st := self.plug.status(max_age=60)):
+            v = L.t("on") if st.get("switch_1") else L.t("off")
+            if st.get("online") and st.get("cur_power") is not None and st.get("switch_1"):
+                v += f" · {st['cur_power'] / 10:g} W"
+            rows.append(("🔌 " + L.t("plug"), v))
+        if not rows:
+            return None
+        return ("<table bordered>" + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in rows)
+                + "</table>")
+
+    def _plug_card(self, L: Lang) -> str | None:
+        st = self.plug.status()
+        if st is None:
+            return None
+        on = bool(st.get("switch_1"))
+        rows = []
+        if st.get("cur_power") is not None:
+            rows.append(("⚡ " + L.t("r_load"), L.t("pl_power", w=f"{st['cur_power'] / 10:g}",
+                                                    v=f"{(st.get('cur_voltage') or 0) / 10:g}").removeprefix("⚡ ")))
+        if left := int(st.get("countdown_1") or 0):
+            rows.append(("⏲ " + L.t("pl_r_timer"), L.t("pl_timer_off" if on else "pl_timer_on",
+                                                      dur=L.dur(left)).removeprefix("⏲ ")))
+        cycle = decode_cycle(st.get("cycle_time", ""))
+        if cycle and cycle["on"]:
+            window = (L.t("pl_allday") if cycle["start"] == cycle["end"] or (cycle["end"] - cycle["start"]) % 1440 >= 1439
+                      else f"{cycle['start'] // 60:02d}:{cycle['start'] % 60:02d}–{cycle['end'] // 60:02d}:{cycle['end'] % 60:02d}")
+            label, _, value = L.t("pl_cycle", c=f"{cycle['work']}/{cycle['rest']}", w=window).partition(": ")
+        else:
+            label, _, value = L.t("pl_cycle_off").partition(": ")
+        rows.append((label, value))
+        html = (f"<h3>{esc(L.t('pl_title', v=L.t('on') if on else L.t('off')))}</h3><table bordered>"
+                + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in rows) + "</table>")
+        return html + (f"<footer>{esc(L.t('pl_cloud_off'))}</footer>" if not st.get("online") else "")
+
+    def _render_plug(self, L: Lang) -> tuple[str, str]:
+        st = self.plug.status()
+        if st is None:
+            return L.t("pl_offline"), self._markup(L, [[{"text": "🔄", "callback_data": "m:plug"}]], back="m:light")
+        on = bool(st.get("switch_1"))
+        lines = [L.t("pl_title", v=L.t("on") if on else L.t("off"))]
+        if not st.get("online"):
+            lines.append(L.t("pl_cloud_off"))
+        if st.get("cur_power") is not None:
+            lines.append(L.t("pl_power", w=f"{st['cur_power'] / 10:g}", v=f"{(st.get('cur_voltage') or 0) / 10:g}"))
+        left = int(st.get("countdown_1") or 0)
+        if left:
+            lines.append(L.t("pl_timer_off" if on else "pl_timer_on", dur=L.dur(left)))
+        cycle = decode_cycle(st.get("cycle_time", ""))
+        current = f"{cycle['work']}/{cycle['rest']}" if cycle and cycle["on"] else ""
+        if current:
+            window = (L.t("pl_allday") if cycle["start"] == cycle["end"] or (cycle["end"] - cycle["start"]) % 1440 >= 1439
+                      else f"{cycle['start'] // 60:02d}:{cycle['start'] % 60:02d}–{cycle['end'] // 60:02d}:{cycle['end'] % 60:02d}")
+            lines.append(L.t("pl_cycle", c=current, w=window))
+        else:
+            lines.append(L.t("pl_cycle_off"))
+        rows = [
+            [{"text": ("• " if on else "") + "✅ " + L.t("on"), "callback_data": "a:plug:on"},
+             {"text": ("• " if not on else "") + "⛔ " + L.t("off"), "callback_data": "a:plug:off"},
+             {"text": "🔄", "callback_data": "m:plug"}],
+            [{"text": "⏲" + L.dur(m * 60), "callback_data": f"a:plug:t{m}"} for m in PLUG_TIMERS]
+            + ([{"text": "⏲✗", "callback_data": "a:plug:t0"}] if left else []),
+            [{"text": ("•" if not current else "") + "🔁✗", "callback_data": "a:plug:c0"}]
+            + [{"text": ("•" if c == current else "") + c, "callback_data": f"a:plug:c{c}"} for c in PLUG_CYCLES]
+            + [{"text": ("•" if current and current not in PLUG_CYCLES else "") + "✏️",
+                "callback_data": "a:plugcycle:edit"}],
+        ]
+        return "\n".join(lines), self._markup(L, rows, back="m:light")
+
+    def _plug_act(self, value: str, ctx: Ctx) -> tuple[str, str]:
+        L, plug = ctx.L, self.plug
+        if value in ("on", "off"):
+            ok = plug.send(switch_1=value == "on")
+        elif value.startswith("t") and value[1:].isdigit() and (int(value[1:]) in PLUG_TIMERS or value == "t0"):
+            ok = plug.send(countdown_1=int(value[1:]) * 60)
+        elif value == "c0":
+            ok = plug.set_cycle(False)
+        elif value[1:] in PLUG_CYCLES:
+            work, rest = (int(x) for x in value[1:].split("/"))
+            ok = plug.set_cycle(True, work, rest)
+        else:
+            return L.t("unknown"), "plug"
+        log.info("Plug %s by %s: %s", value, ctx.user, "ok" if ok else "failed")
+        if not ok and not (plug.status() or {}).get("online"):
+            return L.t("pl_cloud_off_short"), "plug"
+        return (L.t("saved") if ok else L.t("cmd_failed")), "plug"
+
     def act(self, key: str, value: str, ctx: Ctx) -> tuple[str, str]:
         """Apply a button press; returns (toast text, menu to show next)."""
         L, st = ctx.L, self.settings
@@ -455,6 +577,8 @@ class Controller:
             choice = value.partition("@")[0]
             st.set("autolight", "" if choice == "off" else choice)
             return L.t("saved"), "light"
+        if key == "plug" and self.plug:
+            return self._plug_act(value, ctx)
         if key not in STATION_CONTROLS:
             return L.t("unknown"), "root"
         value, _, back = value.partition("@")  # "@light": pressed in the Light / 12V panel

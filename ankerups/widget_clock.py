@@ -30,6 +30,7 @@ background:#2c2f36;color:#f2f2f7}.k2 button.a{background:#f2f2f7;color:#111}
 <div class=w><div class=r><span class=nm>__NAME__</span><span class=ch id=ch></span></div>
 <div class=m><div id=dl></div><div class=c>
 <div><div class=io>__PLUG__<span id=i></span></div><div class=io>__HOME__<span id=o></span></div></div>
+<div class=io id=pw style=display:none>__SOCK__<span id=pv></span></div>
 <div><div class=k id=nk></div><div class=big id=nt></div><div class=sm id=fc></div></div></div></div>
 <div id=bt></div><div class=r><span class=sm id=u></span><div class=k2 id=ctl></div></div></div>
 <script>
@@ -74,7 +75,7 @@ function tick(){var d=D,t=now(),g=d.g,a=avg();if(!d.t)return;
 var k=[d.f,d.p,Math.floor((d.m+(t-d.t)/60)/30),g,Math.floor((t-d.t)/600),a,(d.b||[]).join(),pm,pm||new Date().getMinutes()].join();if(k!=key){key=k;dial();bats()}
 var ch=$("ch");ch.textContent=d.e?"⚠️ "+L.emg:d.gr?L.grp+" "+d.gr:"";ch.style.background=d.e?"#ff453a":"#f2f2f7";ch.style.display=ch.textContent?"":"none";
 var sn=$("sn");if(sn)sn.textContent=(pm||a==null?"":a+"%"+(d.c?" · ":""))+(d.c?dur(t-d.c):"");
-$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";
+$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";$("pw").style.display=d.pw==null?"none":"";$("pv").textContent=d.pw+" W"+" · "+d.pv+" V";
 var nx=d.x&&d.x[0]>t?d.x:null;$("nk").textContent=nx?(nx[1]=="1"?L.onat:L.offat).toUpperCase()+" "+hm(nx[0]):g===0&&d.r?L.rem:"";
 $("nt").textContent=nx?dur(nx[0]-t):g===0&&d.r?"~"+dur(d.r*3600):"";
 var fc="";if(g===0&&nx&&nx[1]=="1"&&d.r&&a!=null){var left=d.r*3600-(t-d.t),need=nx[0]-t;fc=need<left?"≈ "+Math.round(a*(1-need/left))+"% "+L.atOn:"✗"}
@@ -96,6 +97,8 @@ load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick(
 
 PLUG = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
         "stroke-linejoin='round'><rect x='6' y='7' width='12' height='9' rx='3'/><path d='M9 7V3M15 7V3M12 16v2q0 3 3 3h3'/></svg>")
+SOCKET = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
+          "stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='12' cy='12' r='5'/><path d='M10 11v2M14 11v2'/></svg>")
 HOME = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
         "stroke-linejoin='round'><path d='M3 11l9-7 9 7'/><path d='M5.5 9.5V20h13V9.5'/><path d='M10 20v-5h4v5'/></svg>")
 
@@ -109,4 +112,5 @@ def labels(L: Lang) -> dict:
 def widget_html(L: Lang, name: str) -> str:
     html = TEMPLATE.replace("__NAME__", name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     html = html.replace("__PLUG__", PLUG).replace("__HOME__", HOME)
+    html = html.replace("__SOCK__", SOCKET)
     return html.replace("__LABELS__", json.dumps(labels(L), ensure_ascii=False, separators=(",", ":")))

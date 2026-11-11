@@ -86,8 +86,21 @@ def test_autostart_elsewhere_is_an_error(data, monkeypatch):
     assert exc.value.code == 1
 
 
-def test_remaining_time_tells_the_grid_at_zero_load():
-    assert app.remaining_and_grid(6553.5) == (None, True)  # full on the grid: "no value"
-    assert app.remaining_and_grid(1484.6) == (None, True)  # full on the grid: the battery is not used
-    assert app.remaining_and_grid(137.6) == (137.6, False)  # on the battery at 0 W
-    assert app.remaining_and_grid(None) == (None, None) and app.remaining_and_grid(0) == (0.0, None)
+def test_remaining_time_tells_the_grid_by_the_own_draw():
+    full = {"main": 100, "expansion": 100}  # 2112 Wh
+
+    def feed(samples, out=0, ac_in=0, levels=full):
+        g = app.RuntimeGrid()
+        result = None
+        for i, hours in enumerate(samples):
+            result = g.update(i * 3, hours, out, ac_in, levels)
+        return result, g.extra
+
+    assert feed([6553.5, 1484.6, 400, 1604.9])[0] is True  # full on the grid, no load (dips included)
+    assert feed([600, 520, 700], out=4)[0] is True  # the grid, 12V from the battery
+    assert feed([116.8, 53.5, 42.1, 109.5], out=4)[0] is False  # the battery, 12V on: 22-31 W own draw
+    assert feed([56.5, 42.5, 64.9], out=30)[0] is None  # a load: the input tells, the estimate is off
+    assert feed([6553.5, 1484.6, 1604.9], levels={"main": 100, "expansion": 96})[0] is None  # not full
+    assert feed([137.6, 81.8, 94.3, 51.5, 177.8])[0] is False  # on the battery at 0 W (the inverter)
+    assert feed([6553.5, 1484.6])[0] is None  # too few readings yet
+    assert feed([None, 0, None])[0] is None  # AC output off: no remaining time at all

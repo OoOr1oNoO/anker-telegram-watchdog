@@ -21,6 +21,7 @@ body{margin:12px 14px}
 .io{display:flex;justify-content:space-between;margin-top:6px}
 .io div{display:flex;align-items:baseline;gap:7px;padding:5px 12px;border-radius:14px;border:2px solid #636366}
 .io small,.k{font-size:11px;font-weight:600;color:var(--tg-theme-hint-color)}
+#pw svg{width:15px;height:15px;vertical-align:-4px}
 .io b{font-size:20px}
 .fc{border-top:1px solid var(--tg-theme-section-separator-color);margin-top:10px;padding-top:8px;text-align:center}
 .fc b{display:block;font-size:26px;margin-top:2px}.fc i{font-style:normal;font-size:12px;color:var(--tg-theme-hint-color)}
@@ -38,6 +39,7 @@ background:#3a3a3c;color:#fff}.k2 button.a{background:#fff;color:#1c1c1e}
 <div class=big id=b></div><div class=bs id=bs></div><div class=st id=s></div><div class=sb id=sb></div>
 <div id=fl></div>
 <div class=io><div id=ib><small>IN</small><b id=i></b></div><div id=ob><small>OUT</small><b id=o></b></div></div>
+<div id=pw class=bs></div>
 <div class=fc id=fc><span class=k id=fk></span><b id=fv></b><i id=fi></i></div>
 <div class=cd><div class=r><span class=k id=gk></span><span class=k id=gr></span></div><div class=t id=nt></div>
 <div id=x></div><div class=h><i>00</i><i>06</i><i>12</i><i>18</i><i>24</i></div></div>
@@ -79,7 +81,7 @@ $("b").textContent=a==null?"—":a+"%";var bb=d.b||[];
 $("bs").textContent=bb.length>1?bb.map(function(x,i){return(i?L.e+(bb.length>2?" "+i:""):L.m)+" "+x+"%"}).join(" · "):"";
 var s=$("s");s.textContent=(g==null?"?":g?L.on:L.off).toUpperCase();s.style.color=g===0?"#ff9f0a":"#30d158";
 $("sb").textContent=d.c?dur(t-d.c):"";$("sb").style.color=s.style.color;
-$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";
+$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";$("pw").innerHTML=d.pw==null?"":SV+"<rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='12' cy='12' r='5'/><path d='M10 11v2M14 11v2'/></svg> "+d.pw+" W"+" · "+d.pv+" V";
 var nx=d.x&&d.x[0]>t?d.x:null,fc=$("fc");
 if(g===0&&nx&&d.r&&a!=null){var left=d.r*3600-(t-d.t),need=nx[0]-t;fc.style.display="";
 $("fk").textContent=L.leftk;$("fk").style.color="#ff9f0a";$("fv").textContent=need<left?"≈ "+Math.round(a*(1-need/left))+"%":"✗";
@@ -100,6 +102,7 @@ function(){b.textContent="⚠️";shown="";setTimeout(ctl,2500)})});c.appendChil
 function load(){try{D=JSON.parse(W.chatData||"{}")}catch(e){D={}}tick();ctl()}
 load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick()}setInterval(vf,10000);document.addEventListener("visibilitychange",vf);W.ready()
 </script>"""
+
 
 
 def labels(L: Lang) -> dict:

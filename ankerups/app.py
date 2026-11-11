@@ -14,12 +14,14 @@ Config: environment variables or a .env file next to the script/exe (see .env.ex
 
 import argparse
 import asyncio
+import collections
 import contextlib
 import json
 import logging
 import logging.handlers
 import os
 import sys
+import statistics
 import threading
 import time
 import urllib.error
@@ -37,6 +39,7 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 from .bot import BotHandlers, Telegram, card
 from .common import (
     HEALTHCHECK_EVERY,
+    IDLE_LOAD_W,
     IS_WINDOWS,
     REALTIME_TIMEOUT,
     as_int,
@@ -47,6 +50,7 @@ from .common import (
 )
 from .i18n import Lang, lang
 from .menus import STATION_CONTROLS, Controller, Ctx, in_window
+from .plug import Plug
 from .stats import Settings, Stats, chart_title, merge_slot
 from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
@@ -305,6 +309,8 @@ async def run(args: argparse.Namespace) -> None:
         snapshot: dict = {}
         last_plug: int | None = None
         last_flag: bool | None = None
+        runtime = RuntimeGrid()
+        last_draw_log = 0.0
 
         def status_text(L: Lang) -> str:
             if not snapshot:
@@ -349,8 +355,17 @@ async def run(args: argparse.Namespace) -> None:
                                fact, plan_today, plan_tomorrow, change, group,
                                datetime.now().hour * 60 + datetime.now().minute, emergency,
                                *controller.widget_controls(), MAX_OUTPUT.get(device.get("device_pn")),
-                               extras.widget() if extras else None)
+                               (extras.widget() if extras else {}) | plug_extra())
             return watchdog.name, data
+
+        def plug_extra() -> dict:  # the Tuya plug for the widgets: load "pw", voltage "pv", switch "ps"
+            if not controller.plug:
+                return {}
+            load, st = controller.plug.load(), controller.plug.status(max_age=60) or {}
+            out = {} if load is None else {"pw": load[0], "pv": load[1]}
+            if st.get("online") and "switch_1" in st:
+                out["ps"] = int(bool(st["switch_1"]))
+            return out
 
         mqtt_device = SolixMqttDeviceFactory(api_instance=api, device_sn=sn).create_device()
         loop = asyncio.get_running_loop()
@@ -362,6 +377,9 @@ async def run(args: argparse.Namespace) -> None:
         controller = Controller(
             settings, users, lambda: api.mqttsession.mqtt_data.get(sn, {}) if api.mqttsession else {},
             run_on_loop, mqtt_device)
+        controller.plug = Plug.from_env(os.environ)  # optional Tuya smart plug
+        if controller.plug:
+            log.info("Tuya plug %s…", controller.plug.device[:6])
         handlers = BotHandlers(status_text, controller, stats)
         if schedule:
             handlers.sched = controller.sched = ScheduleMenu(schedule)
@@ -422,7 +440,9 @@ async def run(args: argparse.Namespace) -> None:
                 levels, packs = battery_state(data)
                 ac_in = as_int(data.get("ac_input_power", data.get("ac_input_power_total")))
                 charging = as_int(data.get("charging_status"))
-                remaining_h, on_grid_flag = remaining_and_grid(data.get("remaining_time_hours"))
+                remaining_h = data.get("remaining_time_hours")
+                if not isinstance(remaining_h, (int, float)) or not 0 < remaining_h < NO_VALUE_HOURS:
+                    remaining_h = None
                 if levels:
                     snapshot.update(at=now, wall=time.time(), levels=levels, ac_in=ac_in, remaining_h=remaining_h,
                                     out=as_int(data.get("output_power_total")))
@@ -445,13 +465,21 @@ async def run(args: argparse.Namespace) -> None:
                     # ac_input_plug_status (C1000 Gen 2, C2000 Gen 2, C300...): 1 = AC connected;
                     # these models have no charging_status, and with a full battery and a small
                     # load the AC input drops to 0 W while the grid is up
+                    on_grid_flag = runtime.update(now, data.get("remaining_time_hours"),
+                                                  as_int(data.get("output_power_total")), ac_in, levels)
+                    if runtime.extra is not None and now - last_draw_log >= 60:  # to check SELF_DRAW_W
+                        log.debug("own draw %.1f W (remaining %s h, out %s W, ac_in %s W)", runtime.extra,
+                                 data.get("remaining_time_hours"), data.get("output_power_total"), ac_in)
+                        last_draw_log = now
                     if on_grid_flag != last_flag:
-                        log.info("remaining_time_hours says %s (ac_in %s W)",
-                                 "grid" if on_grid_flag else "battery" if on_grid_flag is False else "nothing", ac_in)
+                        log.info("remaining time says %s (own draw %s W, remaining %s h, ac_in %s W)",
+                                 "grid" if on_grid_flag else "battery" if on_grid_flag is False else "nothing",
+                                 None if runtime.extra is None else round(runtime.extra, 1),
+                                 data.get("remaining_time_hours"), ac_in)
                         last_flag = on_grid_flag
-                    plug = as_int(data.get("ac_input_plug_status"))
-                    # the remaining time tells the grid apart too (see remaining_and_grid), but only while
+                    # the remaining time tells the grid apart too (see RuntimeGrid), but only while
                     # it is sent: with the AC output off the station sends none, then the wait is long again
+                    plug = as_int(data.get("ac_input_plug_status"))
                     watchdog.plug_known = plug is not None or on_grid_flag is not None
                     if plug != last_plug:
                         log.info("ac_input_plug_status %s -> %s (ac_in %s W)", last_plug, plug, ac_in)
@@ -469,24 +497,47 @@ async def run(args: argparse.Namespace) -> None:
                 watchdog.evaluate(False, 0, last_levels, load=last_load)
 
 
-GRID_HOURS = 500  # remaining_time_hours above this: the battery is not being used, so the grid is up
+PACK_WH = 1056  # Wh of a C1000(X) and of its expansion battery
+SELF_DRAW_W = 10  # W the battery spends beyond the load: on the battery 22-31 at a small load, on the grid 0-5
+NO_VALUE_HOURS = 6000  # remaining_time_hours of 6553.5: "none", the battery is not used
 
 
-def remaining_and_grid(value) -> tuple[float | None, bool | None]:
-    """remaining_time_hours -> (hours left on the battery, what it says about the grid).
+class RuntimeGrid:
+    """Tells the grid from the battery by the remaining time the station reports.
 
-    The C1000(X) sends its runtime left on the battery: on the battery 16-180 h even at 0 W (its
-    own draw), when full on the grid hundreds or thousands of hours, or 6553.5 (0xFFFF / 10,
-    "none"), as the battery is not used; while charging, the time to full. At zero load and full
-    charge the station takes nothing from the grid for hours, so this is the one sign of the grid
-    then. True: the grid, False: the battery, None: not reported."""
-    try:
-        hours = float(value)
-    except (TypeError, ValueError):
-        return None, None
-    if hours >= GRID_HOURS:
-        return None, True
-    return hours, False if hours > 0 else None
+    A full C1000(X) with no load takes nothing from the grid for hours, so its input says nothing.
+    Its remaining time does: battery energy / remaining time is what the battery spends, and beyond
+    the load it powers (the output not covered by the AC input) that is the station's own draw:
+    12-55 W on the battery (the inverter), 0-5 W on the grid. The median over a minute, since the
+    value jumps from one message to the next. With the AC output off the station sends no remaining
+    time: then None (nothing known)."""
+
+    def __init__(self, window: float = 60):
+        self.window = window
+        self.samples: collections.deque[tuple[float, float]] = collections.deque()
+        self.extra: float | None = None  # the median own draw, W
+
+    def update(self, now: float, hours, out: int | None, ac_in: int | None, levels: dict[str, int]) -> bool | None:
+        try:
+            hours = float(hours)
+        except (TypeError, ValueError):
+            hours = 0.0
+        if hours <= 0 or not levels:
+            self.samples.clear()
+            self.extra = None
+            return None
+        energy = PACK_WH * sum(levels.values()) / 100
+        drain = 0.0 if hours >= NO_VALUE_HOURS else energy / hours
+        self.samples.append((now, drain - max(0, (out or 0) - (ac_in or 0))))
+        while self.samples and now - self.samples[0][0] > self.window:
+            self.samples.popleft()
+        if len(self.samples) < 3 or min(levels.values()) < 100 or (out or 0) >= IDLE_LOAD_W:
+            # only a full station with a small load needs it (else the grid shows in the input), and
+            # under a load the estimate is off (the capacity is approximate): not used then
+            self.extra = statistics.median(x for _, x in self.samples) if self.samples else None
+            return None
+        self.extra = statistics.median(x for _, x in self.samples)
+        return self.extra < SELF_DRAW_W
 
 
 def apply_timezone() -> None:

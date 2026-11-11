@@ -554,13 +554,29 @@ class Telegram:
         self.reply_rich(chat, show(stats.sessions_html), show(stats.sessions_text),
                         lambda L: sessions_menu(L, period, w))
 
-    def _edit(self, msg: dict, view: tuple[str, str | None]) -> None:
-        params = {"chat_id": msg["chat"]["id"], "message_id": msg.get("message_id"), "text": view[0],
-                  "entities": bold_first_line(view[0])}
-        if view[1]:
-            params["reply_markup"] = view[1]
-        with contextlib.suppress(Exception):  # unchanged text makes Telegram return 400
-            self._call("editMessageText", params)
+    def _edit(self, msg: dict, view: tuple[str, str | None], rich: str | None = None) -> None:
+        """Show a menu in the message of its button; rich: as a card. A text message cannot surely
+        become a rich one (and back) by an edit: when the edit is refused, a new message replaces it."""
+        chat, mid = msg["chat"]["id"], msg.get("message_id")
+        text = {"text": view[0], "entities": bold_first_line(view[0])}
+        content = {"rich_message": json.dumps({"html": rich})} if rich else text
+        markup = {"reply_markup": view[1]} if view[1] else {}
+        try:
+            self._call("editMessageText", {"chat_id": chat, "message_id": mid, **content, **markup})
+            return
+        except urllib.error.HTTPError as exc:
+            if "not modified" in exc.read().decode(errors="replace"):  # the same view again
+                return
+        except Exception:
+            return
+        with contextlib.suppress(Exception):
+            self._call("deleteMessage", {"chat_id": chat, "message_id": mid})
+        try:
+            self._call("sendRichMessage" if rich else "sendMessage", {"chat_id": chat, **content, **markup})
+        except Exception:
+            if rich:  # the card refused: the text menu
+                with contextlib.suppress(Exception):
+                    self._call("sendMessage", {"chat_id": chat, **text, **markup})
 
     def _action(self, text: str) -> str | None:
         text = text.strip().lower()
@@ -637,7 +653,12 @@ class Telegram:
             if self.panel_button() is None:  # also refreshes the keyboard without the button
                 self.reply(chat, L.t("no_light"))
             else:
-                self.reply(chat, *h.controller.render("light", Ctx(L, users.is_admin(user), chat, user)), title=True)
+                ctx = Ctx(L, users.is_admin(user), chat, user)
+                (text, markup), card = h.controller.render("light", ctx), h.controller.rich("light", ctx)
+                if card:  # the panel as a card, the text menu if Telegram refuses it
+                    self.reply_rich(chat, lambda L: card, lambda L: text, lambda L: markup)
+                else:
+                    self.reply(chat, text, markup, title=True)
         elif action == "settings":
             self.reply(chat, *h.controller.render("root", Ctx(L, users.is_admin(user), chat, user)), title=True)
         elif action == "stats":
@@ -726,7 +747,7 @@ class Telegram:
                     with contextlib.suppress(Exception):
                         self._call("deleteMessage", {"chat_id": chat, "message_id": msg.get("message_id")})
             elif kind == "m":
-                self._edit(msg, h.controller.render(rest, ctx))
+                self._edit(msg, h.controller.render(rest, ctx), h.controller.rich(rest, ctx))
             elif kind == "l":
                 users.upsert(chat, lang=rest if rest in LANGS else "")
                 ctx.L = users.lang(chat)
@@ -738,7 +759,7 @@ class Telegram:
                 key, _, value = rest.partition(":")
                 toast, menu = h.controller.act(key, value, ctx)
                 if menu != "alert":  # a button under an alert keeps the alert as it is
-                    self._edit(msg, h.controller.render(menu, ctx))
+                    self._edit(msg, h.controller.render(menu, ctx), h.controller.rich(menu, ctx))
             elif kind == "u":
                 toast = self._user_action(rest, ctx, msg, h)
             elif kind == "g" and h.sched:
