@@ -89,7 +89,7 @@ def test_autolight_turns_12v_on_and_off(settings):
     autolight(settings, station, True, 1, meta, sent)  # 01:00, still no power: off for the night
     autolight(settings, station, True, 2, meta, sent)
     assert station.commands == ["1", "0", "1", "0"]
-    assert sent[:2] == ["💡 Auto light: 12V turned on for the outage", "💡 Auto light: 12V turned off"]
+    assert sent[:2] == ["💡 Auto 12V: turned on for the outage", "💡 Auto 12V: turned off"]
 
 
 def test_autolight_leaves_12v_turned_on_by_hand(settings):

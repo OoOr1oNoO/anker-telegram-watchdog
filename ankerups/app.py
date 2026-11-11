@@ -49,8 +49,11 @@ from .common import (
     log,
 )
 from .i18n import Lang, lang
+from .translations import LANGS
 from .menus import STATION_CONTROLS, Controller, Ctx, in_window
 from .plug import Plug
+from .tv import Tv
+from .api import Api
 from .stats import Settings, Stats, chart_title, merge_slot
 from .users import Users
 from .schedmenu import ScheduleMenu, alert_note
@@ -380,7 +383,14 @@ async def run(args: argparse.Namespace) -> None:
         controller.plug = Plug.from_env(os.environ)  # optional Tuya smart plug
         if controller.plug:
             log.info("Tuya plug %s…", controller.plug.device[:6])
+        controller.tv = Tv.from_env(os.environ, data_dir())  # optional Android TV over ADB
+        if controller.tv:
+            controller.tv.start_timer(settings)
+            log.info("TV over ADB at %s:%s", controller.tv.host, controller.tv.port)
         handlers = BotHandlers(status_text, controller, stats)
+        siri = Api.from_env(os.environ, api_routes(controller, watchdog, snapshot, tg, schedule, extras))  # `api` is Anker's
+        if siri:
+            siri.start()
         if schedule:
             handlers.sched = controller.sched = ScheduleMenu(schedule)
             handlers.widget, controller.widgets = widget_info, True
@@ -499,6 +509,77 @@ async def run(args: argparse.Namespace) -> None:
 
 PACK_WH = 1056  # Wh of a C1000(X) and of its expansion battery
 SELF_DRAW_W = 10  # W the battery spends beyond the load: on the battery 22-31 at a small load, on the grid 0-5
+def api_routes(controller: Controller, watchdog: Watchdog, snapshot: dict, tg: Telegram,
+               schedule=None, extras=None) -> dict:
+    """The routes of the Siri / Shortcuts API (api.Api): station switches, the plug, the TV, a status
+    line to read out. ?lang=uk|ru|en... picks the language (the bot's default otherwise)."""
+    def ctx(q: dict) -> Ctx:
+        return Ctx(lang(q["lang"]) if q.get("lang") in LANGS else tg.default, True, "api", "api")
+
+    def done(q: dict, ok: bool) -> str:
+        return ctx(q).L.t("api_ok" if ok else "api_fail")
+
+    def station(key: str, value: str) -> Callable[[dict], str]:
+        return lambda q: done(q, controller.act(key, value, ctx(q))[0].endswith("✓"))
+
+    def status(q: dict) -> str:
+        """Everything about the station in a few sentences for Siri to read out."""
+        L, now = ctx(q).L, time.time()
+        if not snapshot:
+            return L.t("no_data_yet")
+        levels = snapshot["levels"]
+        avg = round(sum(levels.values()) / len(levels))
+        parts = [L.t("t_charge") + " " + L.charge(levels)]
+        if watchdog.on_battery:
+            off = watchdog.outage_seconds()
+            line = L.t("api_off", dur=L.dur(off, True)) if off else L.t("grid_down")
+            if snapshot.get("remaining_h"):  # compact durations read better than "1 d 16 h (...)"
+                line += ", " + L.t("api_left", dur=L.dur(snapshot["remaining_h"] * 3600, True))
+            parts.append(line)
+        elif watchdog.on_battery is False:
+            end = watchdog.stats.last_outage_end() if getattr(watchdog, "stats", None) else None
+            parts.append(L.t("api_on_for", dur=L.dur(now - end, True)) if end else L.t("api_on"))
+        grid_now = None if watchdog.on_battery is None else not watchdog.on_battery
+        if schedule and schedule.configured and (change := schedule.next_change(now, grid_now)):
+            at, wait = time.strftime("%H:%M", time.localtime(change[0])), L.dur(change[0] - now, True)
+            line = L.t("api_next_on" if change[1] == "1" else "api_next_off", t=at, dur=wait)
+            if watchdog.on_battery and change[1] == "1" and snapshot.get("remaining_h"):
+                left, need = snapshot["remaining_h"] * 3600, change[0] - now
+                line += ", " + (L.t("api_then", pct=round(avg * (1 - need / left))) if need < left else L.t("api_not_enough"))
+            parts.append(line)
+        parts.append(L.t("api_load", out=snapshot.get("out") or 0, ac_in=snapshot.get("ac_in") or 0))
+        if extras and getattr(extras, "alert", "") in ("r", "y", "o"):
+            parts.append(L.t("api_alert"))
+        return ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+
+    routes = {"status": status, "12v/on": station("dc", "1"), "12v/off": station("dc", "0"),
+              "light/on": station("light", "3"), "light/off": station("light", "0")}
+    if controller.plug:
+        routes |= {"plug/on": lambda q: done(q, controller.plug.send(switch_1=True)),
+                   "plug/off": lambda q: done(q, controller.plug.send(switch_1=False))}
+    if tv := controller.tv:
+        def timer(q: dict) -> str:
+            m = q.get("min", "")
+            if not m.isdigit() or int(m) > 720:
+                return done(q, False)
+            controller.settings.set("tv_off_at", str(int(time.time() + int(m) * 60)) if int(m) else "")
+            return done(q, True)
+
+        def volume(q: dict) -> str:
+            v = q.get("v", "")
+            if v in ("up", "down"):
+                return done(q, tv.step_volume(25 if v == "up" else -25))
+            return done(q, v.isdigit() and tv.set_volume(int(v)))
+
+        def toggle(q: dict) -> str:
+            state = tv.state(fresh=True)
+            return done(q, state is not None and tv.power(not state))
+        routes |= {"tv/on": lambda q: done(q, tv.power(True)), "tv/off": lambda q: done(q, tv.power(False)),
+                   "tv/toggle": toggle, "tv/pause": lambda q: done(q, tv.press("play")),
+                   "tv/timer": timer, "tv/volume": volume}
+    return routes
+
+
 NO_VALUE_HOURS = 6000  # remaining_time_hours of 6553.5: "none", the battery is not used
 
 

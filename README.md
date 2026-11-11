@@ -22,7 +22,7 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   the status widget, the day's temperature and alert hours in the outages table (`LATITUDE`,
   `LONGITUDE`, `ALERT_REGION`, `ALERT_NEAR` in `.env`)
 - **⚙️ Quick settings** widget (the gear button in the status widget): light, DC 12V, fast
-  charging and display tiles, the AC input limit as a slider, the auto light hours as a
+  charging and display tiles, the AC input limit as a slider, the auto 12V hours as a
   two-handle range and the status look
 - **📅 Outage schedule** (Ukraine): Kyiv by street and house (YASNO), Kyiv region by group
   ([outage-data-ua](https://github.com/Baskerville42/outage-data-ua)); alerts 30 minutes
@@ -30,13 +30,20 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   when emergency outages are announced (the last schedule stays visible, marked as emergency).
   The outage and grid-back alerts say how they compare with the schedule ("20 min earlier
   than the schedule", "not in the schedule")
-- **🔦 Light/12V** button: switch the station light (off / low / medium / high / blink) and the
+- **🔦 Light/12V** button (**🎛 Controls** when a plug or a TV is set up): switch the station light (off / low / medium / high / blink) and the
   DC 12V output, e.g. for a USB lamp in a 12V car adapter (**🔌 12V** on stations without a light).
-  **💡 Auto light**: during an outage in the evening (17–23, 18–24, 18–01 or your own hours)
+  **💡 Auto 12V**: during an outage in the evening (17–23, 18–24, 18–01 or your own hours)
   the bot turns the 12V output on, and off again when the power is back or the hours end
 - Optional **🔌 Tuya / Smart Life plug** (e.g. a fridge or a PC behind it): on / off, a timer and an
   on/off cycle from the 🔦 panel, its load and voltage in the status widget and an on/off button
   there; needs a free Tuya IoT cloud project with your Smart Life account linked (`TUYA_*` in `.env`)
+- Optional **📺 Android TV** over ADB (network debugging, e.g. reached over Tailscale): a remote widget
+  (power, a round pad with OK, back, home, play / pause, mute, volume and off timer sliders), on / off
+  and an off timer; button remote in groups (`TV_ADB`, `TV_NAME` in `.env`)
+- Optional **HTTP API for Siri / Apple Shortcuts** on an address of your choice (e.g. the server's
+  Tailscale address) with a secret key: `/status` reads the station out (charge, grid, the next
+  scheduled change, load, alerts), `/tv/on|off|toggle|pause|timer?min=|volume?v=`, `/12v/on|off`,
+  `/light/on|off`, `/plug/on|off`; `?lang=` picks the language (`API_BIND`, `API_KEY` in `.env`)
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days (with the energy and
   its cost), and tables: outages by day, outages and energy by month, energy through the station
   (kWh in / out and the cost at your tariff, 4.32 UAH/kWh by default), and load sessions (long

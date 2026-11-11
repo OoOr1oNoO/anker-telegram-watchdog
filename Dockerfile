@@ -7,7 +7,7 @@ ARG ANKER_API=https://github.com/thomluther/anker-solix-api/archive/refs/tags/v3
 # tzdata for TIMEZONE; the rest are wheels for amd64 and arm64
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "anker-solix-api @ ${ANKER_API}" matplotlib \
+    && pip install --no-cache-dir "anker-solix-api @ ${ANKER_API}" matplotlib adb-shell==0.4.4 \
     && useradd --uid 1000 --create-home app && mkdir /data && chown app:app /data
 
 WORKDIR /app

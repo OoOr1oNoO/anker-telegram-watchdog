@@ -3,6 +3,7 @@
 # dependencies = [
 #     "anker-solix-api @ https://github.com/thomluther/anker-solix-api/archive/refs/tags/v3.9.1.tar.gz",
 #     "matplotlib",
+#     "adb-shell==0.4.4",
 # ]
 # ///
 """Anker SOLIX power station watchdog with a Telegram bot; the code is in the ankerups package.

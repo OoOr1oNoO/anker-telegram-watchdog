@@ -20,7 +20,7 @@ from .menus import TEXT_SETTINGS, Controller, Ctx, paint
 from .stats import SESSION_CHOICES, SESSION_PERIODS, Settings, Stats, chart_title, parse_range, session_period
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
-from . import widget_clock, widget_ios, widget_quick
+from . import widget_clock, widget_ios, widget_quick, widget_remote
 from .widget import widget_html
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class BotHandlers:
     sched: "ScheduleMenu | None" = None
 
 
-KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_12v", "light"),
+KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_12v", "light"), ("btn_controls", "light"),
                     ("btn_stats", "stats"), ("btn_settings", "settings"))
 
 
@@ -241,7 +241,7 @@ class Telegram:
                     name, data = payload()
                     fallback, style = extra
                     html = {"ios": widget_ios.widget_html, "clock": widget_clock.widget_html,
-                            "quick": widget_quick.widget_html}.get(style, widget_html)(L, name)
+                            "quick": widget_quick.widget_html, "remote": widget_remote.widget_html}.get(style, widget_html)(L, name)
                     self._deliver_widget(chat, html, data, L, fallback, style)
                 except Exception:
                     log.exception("Status widget failed")
@@ -391,7 +391,7 @@ class Telegram:
             if exc.code == 429:
                 self.widgets_blocked[f"{chat}|{style}"] = time.time() + (retry_after(body) or 60)
             elif "WIDGET_NOT_ALLOWED" in body:  # groups: widgets are for private chats for now
-                for look in ("widget", "ios", "clock", "quick"):
+                for look in ("widget", "ios", "clock", "quick", "remote"):
                     self.widgets_blocked[f"{chat}|{look}"] = time.time() + 86400
             self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
             return
@@ -427,6 +427,8 @@ class Telegram:
         gone = []
         for key, (message_id, sent) in widgets.items():
             chat, _, look = key.partition("|")
+            if look == "remote":  # the TV remote has no live data
+                continue
             payload = data if look != "quick" else (
                 widget_quick.with_look(quick, self.users.status_style(chat)) if quick and self.users else quick)
             if payload is None:
@@ -755,6 +757,14 @@ class Telegram:
                 self.reply(chat, ctx.L.t("lang_title", v=LANG_NAMES[ctx.L.code]))  # refreshes the keyboard
             elif kind == "a" and rest.endswith(":edit") and rest.split(":")[0] in TEXT_SETTINGS:  # ✏️
                 self._ask(chat, user, rest.split(":")[0], h)
+            elif kind == "a" and rest == "tv:remote" and h.controller.tv:  # 📺 the remote widget
+                if chat.startswith("-") or self._blocked(f"{chat}|remote", self.widgets_blocked):  # groups: the card
+                    self._edit(msg, h.controller.render("tv", ctx), h.controller.rich("tv", ctx))
+                else:
+                    name = h.controller.tv.name or ctx.L.t("tv")
+                    data = widget_remote.remote_data(float(h.controller.settings.get("tv_off_at") or 0),
+                                                     h.controller.tv.volume())
+                    self.send_widget(chat, lambda: (name, data), lambda L: h.controller.render("tv", ctx)[0], "remote")
             elif kind == "a":
                 key, _, value = rest.partition(":")
                 toast, menu = h.controller.act(key, value, ctx)

@@ -114,7 +114,7 @@ def test_light_panel_has_dc_switch(bot: FakeBot):
     assert buttons(calls[0][1])[-2:] == [["🔌 12V On", "• 🔌 12V Off"], ["•💡✗", "17–23", "18–24", "18–01", "✏️"]]
     calls = bot.press(bot.ADMIN, "a:autolight:18-01@light")
     assert toast(calls) == "Saved" and "<td>💡 Auto 12V in an outage</td><td>18:00–01:00</td>" in card(calls)
-    assert texts(bot.press(bot.ADMIN, "a:autolight:edit")) == ["Send the hours for the auto light, e.g. 18:30-00:30"]
+    assert texts(bot.press(bot.ADMIN, "a:autolight:edit")) == ["Send the hours for auto 12V, e.g. 18:30-00:30"]
     assert texts(bot.message(bot.ADMIN, "late")) == [
         "Could not read it: send the start and the end, e.g. 18:30-00:30 (at most 16 h)"]
     calls = bot.message(bot.ADMIN, "18.30 - 0.30")

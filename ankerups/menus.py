@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from .common import as_int, log
 from .i18n import Lang, lang
 from .plug import decode_cycle, parse_cycle
+from .tv import PAD, parse_timer
 from .stats import Settings, esc
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, STATUS_STYLES, Users
@@ -99,7 +100,9 @@ def paint(rows: list[list[dict]]) -> list[list[dict]]:
 # settings typed in by an admin after ✏️: key -> (prompt, "could not read it", menu to show)
 TEXT_SETTINGS = {"autolight": ("al_auto_ask", "al_auto_bad", "light"),
                  "tariff": ("tf_ask", "tf_bad", "notif"),
-                 "plugcycle": ("pl_ask", "pl_bad", "plug")}
+                 "plugcycle": ("pl_ask", "pl_bad", "plug"),
+                 "tvtimer": ("tv_ask", "tv_bad", "tv")}
+TV_TIMERS = [30, 60, 120]  # minutes until the TV goes off
 PLUG_TIMERS = [30, 60, 120, 240]  # minutes: the plug switches over when the countdown ends
 PLUG_CYCLES = ["10/10", "15/15", "20/10", "30/30"]
 PEAK_MODES = ["", "both", "end"]  # high load alerts: off, start and end, only the end
@@ -166,6 +169,7 @@ class Controller:
         self.widgets = False  # 📊 Status can be a widget: show the widget / text switch
         self.pending: dict[str, tuple[str, float]] = {}  # field -> (value, time) until telemetry catches up
         self.plug = None  # plug.Plug (Tuya smart plug), set by the app when .env has it
+        self.tv = None  # tv.Tv (an Android TV over ADB), set by the app when .env has it
 
     def _state(self, key: str) -> str | None:
         field = STATION_CONTROLS[key][0]
@@ -179,8 +183,11 @@ class Controller:
         return STATION_CONTROLS[key][2](L, state) if state in STATION_CONTROLS[key][1] else "?"
 
     def panel_button(self) -> str | None:
-        """Label key of the light / DC 12V panel button: "btn_light" with a light (also before the
-        first telemetry), "btn_12v" with only the DC 12V output, None when the station has neither."""
+        """Label key of the light / DC 12V panel button: "btn_controls" with a plug or a TV too,
+        "btn_light" with a light (also before the first telemetry), "btn_12v" with only the DC 12V
+        output, None when the station has neither."""
+        if self.plug or self.tv:  # more than the station: one "Controls" panel for all
+            return "btn_controls"
         data = self.data()
         if "light_mode" in data:
             self.light_seen = True
@@ -210,6 +217,20 @@ class Controller:
         key, _, value = action.partition(":")
         if key in ("light", "dc"):
             return self.toggle(key, ctx)
+        if key == "tv" and self.tv:  # the remote widget: power toggles, k<button> presses
+            if value.startswith("vol:") and value[4:].isdigit():
+                return "" if self.tv.set_volume(int(value[4:])) else ctx.L.t("tv_none") + " ✗"
+            if value.startswith("timer:") and value[6:].isdigit() and int(value[6:]) <= 240:
+                m = int(value[6:])
+                self.settings.set("tv_off_at", str(int(time.time() + m * 60)) if m else "")
+                log.info("TV off timer %s min by %s (remote)", m, ctx.user)
+                return ""
+            if value == "power":
+                state = self.tv.state(fresh=True)
+                ok = state is not None and self.tv.power(not state)
+            else:
+                ok = self.tv.press(value[1:]) if value.startswith("k") else False
+            return "" if ok else ctx.L.t("tv_none") + " ✗"
         if key == "plug" and self.plug:  # the Tuya plug on <-> off
             return self._plug_act("off" if (self.plug.status() or {}).get("switch_1") else "on", ctx)[0]
         if key == "fast" and self._supported("fast"):
@@ -244,6 +265,13 @@ class Controller:
             if not span:
                 return None
             value = "-".join(f"{m // 60:02d}:{m % 60:02d}" for m in span)
+        elif kind == "tvtimer":
+            at = parse_timer(text) if self.tv else None
+            if not at:
+                return None
+            self.settings.set("tv_off_at", str(int(at)))
+            log.info("TV off timer %s by %s", text.strip(), ctx.user)
+            return self.render("tv", ctx)
         elif kind == "plugcycle":
             cycle = parse_cycle(text) if self.plug else None
             if not cycle:
@@ -311,12 +339,16 @@ class Controller:
                               "callback_data": f"a:autolight:{c or 'off'}@light"} for c in AUTOLIGHT_CHOICES]
                             + [{"text": ("•" if auto not in AUTOLIGHT_CHOICES else "") + "✏️",
                                 "callback_data": "a:autolight:edit"}])
-            if self.plug:
-                rows.append([{"text": "🔌 " + L.t("plug"), "callback_data": "m:plug"}])
-                lines = lines or ["🔌 " + L.t("plug")]
+            extra = ([{"text": "🔌 " + L.t("plug"), "callback_data": "m:plug"}] if self.plug else []) + (
+                [{"text": "📺 " + self._tv_name(L), "callback_data": "a:tv:remote"}] if self.tv else [])
+            if extra:
+                rows.append(extra)
+                lines = lines or [b["text"] for b in extra]
             return "\n".join(lines or [L.t("no_light")]), self._markup(L, rows, back=None)
         if menu == "plug" and self.plug:
             return self._render_plug(L)
+        if menu == "tv" and self.tv:
+            return self._render_tv(L)
         if menu == "notif":
             th = st.thresholds
             on_off = {True: L.t("on"), False: L.t("off")}
@@ -455,7 +487,61 @@ class Controller:
             return self._plug_card(ctx.L)
         if menu == "light":
             return self._light_card(ctx.L)
+        if menu == "tv" and self.tv:
+            return self._tv_card(ctx.L)
         return None
+
+    def _tv_name(self, L: Lang) -> str:
+        return self.tv.name or L.t("tv")
+
+    def _tv_lines(self, L: Lang) -> tuple[str, str | None]:
+        """(the state, the off timer or None) of the TV."""
+        state = self.tv.state()
+        v = L.t("tv_none") if state is None else L.t("on") if state else L.t("off")
+        try:
+            at = float(self.settings.get("tv_off_at") or 0)
+        except ValueError:
+            at = 0
+        timer = (L.t("tv_off_at", t=time.strftime("%H:%M", time.localtime(at)), dur=L.dur(at - time.time()))
+                 if at > time.time() else None)
+        return v, timer
+
+    def _tv_card(self, L: Lang) -> str:
+        v, timer = self._tv_lines(L)
+        rows = [("⏲ " + L.t("pl_r_timer"), timer or L.t("off"))]
+        return (f"<h3>{esc('📺 ' + self._tv_name(L) + ': ' + v)}</h3><table bordered>"
+                + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in rows) + "</table>")
+
+    def _render_tv(self, L: Lang) -> tuple[str, str]:
+        v, timer = self._tv_lines(L)
+        lines = ["📺 " + self._tv_name(L) + ": " + v, "⏲ " + L.t("pl_r_timer") + ": " + (timer or L.t("off"))]
+        rows = [
+            [{"text": "✅ " + L.t("on"), "callback_data": "a:tv:on"},
+             {"text": "⛔ " + L.t("off"), "callback_data": "a:tv:off"},
+             {"text": "🔄", "callback_data": "m:tv"}],
+            [{"text": "⏲" + L.dur(m * 60), "callback_data": f"a:tv:t{m}"} for m in TV_TIMERS]
+            + ([{"text": "⏲✗", "callback_data": "a:tv:t0"}] if timer else [])
+            + [{"text": "✏️", "callback_data": "a:tvtimer:edit"}],
+            *([{"text": label, "callback_data": f"a:tv:k{name}"} for name, label in row] for row in PAD),
+        ]
+        return "\n".join(lines), self._markup(L, rows, back="m:light")
+
+    def _tv_act(self, value: str, ctx: Ctx) -> tuple[str, str]:
+        L = ctx.L
+        if value in ("on", "off"):
+            ok = self.tv.power(value == "on")
+            log.info("TV %s by %s: %s", value, ctx.user, "ok" if ok else "failed")
+            return (L.t("saved") if ok else L.t("tv_none") + " ✗"), "tv"
+        if value.startswith("k"):  # a remote button: nothing to redraw, so the menu stays as it is
+            step = {"vdown": -10, "vup": 10}.get(value[1:])
+            ok = self.tv.step_volume(step) if step else self.tv.press(value[1:])
+            return ("" if ok else L.t("tv_none") + " ✗"), "alert"
+        if value.startswith("t") and value[1:].isdigit() and (int(value[1:]) in TV_TIMERS or value == "t0"):
+            m = int(value[1:])
+            self.settings.set("tv_off_at", str(int(time.time() + m * 60)) if m else "")
+            log.info("TV off timer %s min by %s", m, ctx.user)
+            return L.t("saved"), "tv"
+        return L.t("unknown"), "tv"
 
     def _light_card(self, L: Lang) -> str | None:
         """The light, DC 12V, auto light and the plug in one table."""
@@ -470,6 +556,9 @@ class Controller:
             if st.get("online") and st.get("cur_power") is not None and st.get("switch_1"):
                 v += f" · {st['cur_power'] / 10:g} W"
             rows.append(("🔌 " + L.t("plug"), v))
+        if self.tv:
+            v, timer = self._tv_lines(L)
+            rows.append(("📺 " + self._tv_name(L), v + (" · ⏲ " + timer if timer else "")))
         if not rows:
             return None
         return ("<table bordered>" + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in rows)
@@ -579,6 +668,8 @@ class Controller:
             return L.t("saved"), "light"
         if key == "plug" and self.plug:
             return self._plug_act(value, ctx)
+        if key == "tv" and self.tv:
+            return self._tv_act(value, ctx)
         if key not in STATION_CONTROLS:
             return L.t("unknown"), "root"
         value, _, back = value.partition("@")  # "@light": pressed in the Light / 12V panel
