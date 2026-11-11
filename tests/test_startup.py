@@ -84,3 +84,10 @@ def test_autostart_elsewhere_is_an_error(data, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         app.main()
     assert exc.value.code == 1
+
+
+def test_remaining_time_tells_the_grid_at_zero_load():
+    assert app.remaining_and_grid(6553.5) == (None, True)  # full on the grid: "no value"
+    assert app.remaining_and_grid(1484.6) == (None, True)  # full on the grid: the battery is not used
+    assert app.remaining_and_grid(137.6) == (137.6, False)  # on the battery at 0 W
+    assert app.remaining_and_grid(None) == (None, None) and app.remaining_and_grid(0) == (0.0, None)

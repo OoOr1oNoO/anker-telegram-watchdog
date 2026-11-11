@@ -18,6 +18,7 @@ def run(monkeypatch, stats, settings):
     clock = Clock()
     monkeypatch.setattr(time, "monotonic", lambda: clock.t)
     sent: list[tuple[int, str]] = []
+    cards: list[str] = []
 
     class TG:
         default = lang("en")
@@ -25,14 +26,15 @@ def run(monkeypatch, stats, settings):
         def send(self, render, markup=None, thread=None, rich=None, end=None):
             sent.append((int(clock.t - 1000), render(lang("en"))))
             if rich:  # the cards render too
-                assert rich(lang("en")).startswith("<h3>")
+                html = rich(lang("en"))
+                assert html.startswith("<h3>")
+                cards.append(html)
 
     class Power:
         def power_saver(self): ...
         def restore(self): ...
 
-    w = Watchdog(TG(), Power(), 10, settings, "Station", stats, full_confirm_s=180)
-    w.planned_off = lambda ts: True  # the 3-minute wait; the schedule-aware one is tested below
+    w = Watchdog(TG(), Power(), 10, settings, "Station", stats, full_confirm_s=180, idle_confirm_s=180)
 
     def feed(seconds, ac_in, levels, load=0, step=4):
         for _ in range(int(seconds / step)):
@@ -40,6 +42,7 @@ def run(monkeypatch, stats, settings):
             clock.t += step
 
     feed.sent = sent
+    feed.cards = cards
     feed.w = w
     return feed
 
@@ -101,17 +104,31 @@ def test_no_full_charge_alert_after_short_outage_at_full(run):
     assert not [text for _, text in run.sent if "Fully charged" in text]
 
 
-def test_full_idle_station_waits_10_minutes_unless_an_outage_is_planned(run):
-    run.w.planned_off = lambda ts: False  # the schedule says the power is on
+def test_full_idle_station_waits_20_minutes_even_in_a_planned_outage(run):
+    run.w.idle_confirm_s = 1200  # the default; a planned outage does not shorten it
     run(20, 16, FULL)
-    run(400, 0, FULL)  # night pauses of up to ~6 min with the grid up
+    run(860, 0, FULL)  # pauses of up to ~14 min between the pulses with the grid up
     assert run.sent == []
-    run(260, 0, FULL)
+    run(400, 0, FULL)
     assert len(run.sent) == 1 and "lost AC input at " in run.sent[0][1]
 
 
 def test_stations_with_a_plug_status_never_wait(run):
-    run.w.plug_known, run.w.planned_off = True, (lambda ts: None)
+    run.w.plug_known = True
     run(20, 16, FULL)
     run(20, 0, FULL)
     assert len(run.sent) == 1
+
+
+def test_threshold_and_back_cards_show_the_load(run, stats):
+    run(20, 120, FULL, load=60)
+    run(20, 0, FULL, load=60)  # outage confirmed
+    start = time.time()
+    for i in range(10):
+        stats._exec("INSERT OR REPLACE INTO samples VALUES (?, 0, ?, 90, 0)", (int(start) + i, 40 + i * 10))
+    run(20, 0, {"main": 45}, load=70)
+    threshold = next(c for c in run.cards if "Threshold" in c)
+    assert "<td>⚡ Load</td><td>70 W now, avg" in threshold
+    run(20, 120, {"main": 45}, load=70)
+    back = run.cards[-1]
+    assert "Grid power is back" in back and "<td>⚡ Load</td><td>avg" in back and "⬆️ Used" in back

@@ -106,7 +106,7 @@ def show_popup(title: str, text: str) -> None:
 class Watchdog:
     def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, settings: Settings,
                  name: str = "Anker", stats: Stats | None = None, full_confirm_s: float = 180,
-                 idle_confirm_s: float = 600):
+                 idle_confirm_s: float = 1200):
         self.name = name
         self.stats = stats
         self.tg = tg
@@ -121,7 +121,6 @@ class Watchdog:
         # Stations that report the AC plug (plug_known) show the grid directly and never wait.
         self.idle_confirm_s = idle_confirm_s
         self.plug_known = False
-        self.planned_off: Callable[[float], bool | None] = lambda ts: None  # set by the app
         self.settings = settings
         self.on_battery: bool | None = None  # None until the first telemetry
         self.no_grid_since: float | None = None
@@ -176,11 +175,15 @@ class Watchdog:
                 if self.settings.flag("alert_outage"):
                     off, at = self.outage_seconds(), time.time()
                     start, soc = self.outage_started, self.stats.open_outage_soc() if self.stats else None
+                    use = self.stats.load_avg_peak(start) if self.stats and start else None
+                    used = self.stats.energy_kwh(start)[1] if use else 0
 
                     def summary(L: Lang) -> str:  # one message per outage: the alerts before it go
                         return card(L.t("al_back_t", dur=L.dur(off) if off else "?"), [
                             ("🔌 " + L.t("ob_outage"), f"{hm(start)} → {hm(at)}" if start else hm(at)),
-                            ("🔋 " + L.t("t_charge"), (f"{soc}% → " if soc is not None else "") + L.charge(levels))],
+                            ("🔋 " + L.t("t_charge"), (f"{soc}% → " if soc is not None else "") + L.charge(levels)),
+                            *([("⚡ " + L.t("r_load"), L.t("r_avg_peak", avg=f"{use[0]:.0f}", peak=f"{use[1]:.0f}")),
+                               ("⬆️ " + L.t("r_used"), L.energy(used))] if use else [])],
                             self.note(L, "back", at))
                     self.tg.send(lambda L: L.t("al_back", dur=L.dur(off) if off else "?",
                                                charge=L.charge(levels)) + self.note(L, "back", at),
@@ -214,11 +217,19 @@ class Watchdog:
         def left_row(L: Lang) -> list[tuple[str, str]]:
             return [("⏳ " + L.t("r_left"), "~" + L.dur(remaining_h * 3600))] if remaining_h else []
 
+        def load_row(L: Lang) -> list[tuple[str, str]]:  # now and the average since the outage began
+            avg = self.stats.load_avg_peak(self.outage_started) if self.stats and self.outage_started else None
+            if load is None:
+                return []
+            return [("⚡ " + L.t("r_load"), L.t("r_now_avg", now=load, avg=f"{avg[0]:.0f}") if avg else f"{load} W")]
+
         if self.no_grid_since is None:
             self.no_grid_since = now
         wait = self.confirm_s
         if min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W and not self.plug_known:
-            wait = self.full_confirm_s if self.planned_off(time.time()) else max(self.full_confirm_s, self.idle_confirm_s)
+            # a full idle station takes its few watts in pulses minutes apart (seen up to 14 min)
+            # with the grid up; the schedule is not trusted here, it is often not kept
+            wait = max(self.full_confirm_s, self.idle_confirm_s)
         if not self.on_battery and now - self.no_grid_since >= wait:
             self.on_battery = True
             resumed = self.stats.open_outage() if self.stats else None
@@ -268,7 +279,7 @@ class Watchdog:
                         "al_threshold", name=L.battery(key), pct=pct, t=t, charge=L.charge(levels), left=left(L)),
                         thread="outage", rich=lambda L, key=key, pct=pct, t=t: card(
                             L.t("c_threshold", pct=pct) + (f" · {L.battery(key)}" if len(levels) > 1 else ""),
-                            [("🔋 " + L.t("t_charge"), L.charge(levels)), *left_row(L),
+                            [("🔋 " + L.t("t_charge"), L.charge(levels)), *load_row(L), *left_row(L),
                              ("🎯 " + L.t("r_threshold"), f"{t}%")]))
             critical = self.settings.critical
             if critical and total <= critical and not self.critical_fired:
@@ -276,7 +287,7 @@ class Watchdog:
                 self._save_fired()
                 self.tg.send(lambda L: L.t("al_critical", charge=L.charge(levels), left=left(L)), thread="outage",
                              rich=lambda L: card(L.t("c_critical"), [("🔋 " + L.t("t_charge"), L.charge(levels)),
-                                                                     *left_row(L)], L.t("al_critical_note")))
+                                                                     *load_row(L), *left_row(L)], L.t("al_critical_note")))
                 L = self.tg.default
                 show_popup(L.t("popup_title", name=name),
                            L.t("popup_text", charge=L.charge(levels), left=left(L)))

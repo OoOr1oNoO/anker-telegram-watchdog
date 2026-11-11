@@ -4,6 +4,7 @@
 import io
 import sqlite3
 import threading
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,14 +25,72 @@ def merge_slot(slot: str, grid: bool) -> str:
 DEFAULT_TARIFF = 4.32  # UAH per kWh, Ukrainian households
 
 
+HEAVY_W = 150  # W: the heavy part of a load session (games and the like)
+SESSION_GAP = 600  # s: dips below the threshold shorter than this do not end a session
+SESSION_MIN = 1800  # s: shorter runs are not sessions
+SESSION_CHOICES = (50, 80, 100, 150, 200)
+SESSION_ROWS = 25  # the newest sessions in the table; the totals cover the whole period
+SESSION_PERIODS = ("today", "yday", "7", "30")
+
+
+def session_period(code: str, L: Lang, now: datetime | None = None) -> tuple[float, float, str] | None:
+    """A period of the sessions table: today, yday, 7, 30 or "YYYYMMDD-YYYYMMDD" (both days included)
+    -> (start, end, its label); None if the code is not valid."""
+    now = now or datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if code == "today":
+        return today.timestamp(), now.timestamp(), L.t("p_today")
+    if code == "yday":
+        return (today - timedelta(days=1)).timestamp(), today.timestamp(), L.t("p_yday")
+    if code in ("7", "30"):
+        return (now - timedelta(days=int(code))).timestamp(), now.timestamp(), L.t(f"p_{code}d")
+    try:
+        a, b = (datetime.strptime(part, "%Y%m%d") for part in code.split("-"))
+    except ValueError:
+        return None
+    label = f"{a:%d.%m}" if a == b else f"{a:%d.%m}–{b:%d.%m}"
+    return a.timestamp(), min((b + timedelta(days=1)).timestamp(), now.timestamp()), label
+
+
+def parse_range(text: str, now: datetime | None = None) -> str | None:
+    """"05.11", "5.11–8.11" or "05.11.2026 - 08.11.2026" -> "20261105-20261108"; None if not dates."""
+    now = now or datetime.now()
+    found = re.findall(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", text)
+    if not 1 <= len(found) <= 2:
+        return None
+    days = []
+    for d, m, y in found:
+        year = int(y) + (2000 if y and len(y) == 2 else 0) if y else now.year
+        try:
+            day = datetime(year, int(m), int(d))
+        except ValueError:
+            return None
+        if not y and day > now:  # "28.12" typed in January: the last one
+            day = day.replace(year=year - 1)
+        days.append(day)
+    a, b = min(days), max(days)
+    if (b - a).days > 92:
+        return None
+    return f"{a:%Y%m%d}-{b:%Y%m%d}"
+
+
 def esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def table(rows: list[list[str]], compact: bool = False) -> str:
+def _cell(c) -> str:
+    """A body cell: text, (text, rows) spanning rows below it, or None where such a cell covers it."""
+    if c is None:
+        return ""
+    if isinstance(c, tuple):
+        return f'<td rowspan="{c[1]}" valign="middle">{esc(c[0])}</td>' if c[1] > 1 else f"<td>{esc(c[0])}</td>"
+    return f"<td>{esc(c)}</td>"
+
+
+def table(rows: list[list], compact: bool = False) -> str:
     """A rich-message table; the first row is the header."""
     head = "".join(f"<th><b>{esc(c)}</b></th>" for c in rows[0])
-    body = "".join("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in r) + "</tr>" for r in rows[1:])
+    body = "".join("<tr>" + "".join(_cell(c) for c in r) + "</tr>" for r in rows[1:])
     return f"<table bordered striped{' compact' if compact else ''}><tr>{head}</tr>{body}</table>"
 
 
@@ -127,6 +186,12 @@ class Stats:
                           "WHERE ts >= ? AND ts < ?", (int(since), int(until or time.time() + 60)))
         return rows[0][0] * 60 / 3.6e6, rows[0][1] * 60 / 3.6e6
 
+    def load_avg_peak(self, since: float, until: float | None = None) -> tuple[float, float] | None:
+        """Average and peak output (W) in a period; None without samples."""
+        rows = self._exec("SELECT AVG(out), MAX(out) FROM samples WHERE ts >= ? AND ts < ?",
+                          (int(since), int(until or time.time() + 60)))
+        return (rows[0][0], rows[0][1]) if rows and rows[0][0] is not None else None
+
     def outages_between(self, start: float, end: float) -> list[tuple]:
         # outages overlapping the window; an open one counts until now
         return self._exec("SELECT start, COALESCE(end, CAST(strftime('%s','now') AS INTEGER)), "
@@ -189,6 +254,86 @@ class Stats:
             rows.append([L.t(label), f"{e_in:.2f}", f"{e_out:.2f}", L.money(e_in * tariff)])
         return (f"<h3>{esc(L.t('en_title_short'))}</h3>" + table(rows)
                 + f"<footer>{esc(L.t('t_tariff_note', v=L.money(tariff)))}</footer>")
+
+    def sessions(self, threshold: int, since: float, heavy: int = HEAVY_W, gap: float = SESSION_GAP,
+                 min_len: float = SESSION_MIN) -> list[dict]:
+        """Runs of load at or above the threshold (dips shorter than gap do not split them), at least
+        min_len long: start, end, Wh, average and peak W, seconds at or above heavy W."""
+        rows = self._exec("SELECT ts, out FROM samples WHERE ts >= ? ORDER BY ts", (int(since),))
+        found, cur = [], None
+        for ts, out in rows:
+            out = out or 0
+            if cur and ts - cur["end"] > gap:  # the run is over
+                found.append(cur)
+                cur = None
+            if cur:  # inside a run (dips included): everything counts
+                cur["wh"] += out / 60
+                cur["peak"] = max(cur["peak"], out)
+                cur["heavy"] += 60 if out >= heavy else 0
+                cur["n"] += 1
+                if out >= threshold:
+                    cur["end"] = ts
+            elif out >= threshold:
+                cur = {"start": ts, "end": ts, "wh": out / 60, "peak": out, "heavy": 60 if out >= heavy else 0, "n": 1}
+        if cur:
+            found.append(cur)
+        result = []
+        for s in found:
+            if s["end"] - s["start"] + 60 < min_len:
+                continue
+            s["end"] += 60  # minute samples: the last one covers its minute
+            s["avg"] = s["wh"] * 60 / s["n"]
+            s["open"] = time.time() - s["end"] < gap
+            result.append(s)
+        return result
+
+    def sessions_between(self, threshold: int, start: float, end: float) -> list[dict]:
+        """The sessions overlapping a period (one that crosses its start is shown whole)."""
+        return [x for x in self.sessions(threshold, start - 86400) if x["end"] > start and x["start"] < end]
+
+    def sessions_html(self, L: Lang, tariff: float, threshold: int, start: float, end: float, period: str) -> str:
+        """Long runs of load in a period: one row per session (the newest first), the totals below."""
+        found = self.sessions_between(threshold, start, end)
+        title = f"<h3>{esc(L.t('ses_title', w=threshold, period=period))}</h3>"
+        if not found:
+            return title + f"<p>{esc(L.t('ses_none'))}</p>"
+        heavy = threshold < HEAVY_W
+        days = end - start > 86400 + 3600  # more than a day: each row needs its date
+        # the currency in the header, not in every row: the table fits a phone better
+        rows = [([L.t("t_day")] if days else []) + [L.t("t_time"), "⏱", L.t("t_kwh"), L.t("currency"),
+                                                     L.t("t_avg_peak")] + ([f"≥{HEAVY_W} W"] if heavy else [])]
+        shown = found[::-1][:SESSION_ROWS]
+        per_day: dict[str, int] = {}
+        for x in shown:
+            key = f"{datetime.fromtimestamp(x['start']):%d.%m}"
+            per_day[key] = per_day.get(key, 0) + 1
+        prev = ""
+        for x in shown:
+            a, b = datetime.fromtimestamp(x["start"]), datetime.fromtimestamp(x["end"])
+            day = f"{a:%d.%m}"
+            row = ([(day, per_day[day]) if day != prev else None] if days else []) + [  # one merged day cell
+                f"{a:%H:%M}–" + ("…" if x["open"] else f"{b:%H:%M}"), L.dur(x["end"] - x["start"], True),
+                f"{x['wh'] / 1000:.2f}", f"{x['wh'] / 1000 * tariff:.2f}", f"{x['avg']:.0f}/{x['peak']:.0f}"]
+            prev = day
+            if heavy:
+                row.append(L.dur(x["heavy"], True) if x["heavy"] >= 60 else "—")
+            rows.append(row)
+        kwh = sum(x["wh"] for x in found) / 1000
+        notes = [L.t("ses_total", n=len(found), dur=L.dur(sum(x["end"] - x["start"] for x in found), True),
+                     kwh=f"{kwh:.2f}", cost=L.money(kwh * tariff))]
+        if len(found) > SESSION_ROWS:
+            notes.append(L.t("ses_more", n=SESSION_ROWS))
+        return title + table(rows, compact=True) + f"<footer>{esc(' · '.join(notes))}</footer>"
+
+    def sessions_text(self, L: Lang, tariff: float, threshold: int, start: float, end: float, period: str) -> str:
+        found = self.sessions_between(threshold, start, end)
+        lines = [L.t("ses_title", w=threshold, period=period)]
+        for x in found[::-1][:SESSION_ROWS]:
+            a, b = datetime.fromtimestamp(x["start"]), datetime.fromtimestamp(x["end"])
+            lines.append(f"{a:%d.%m %H:%M}–" + ("…" if x["open"] else f"{b:%H:%M}")
+                         + f" · {L.dur(x['end'] - x['start'])} · {L.energy(x['wh'] / 1000)} · "
+                         + f"{L.money(x['wh'] / 1000 * tariff)} · {x['avg']:.0f}/{x['peak']:.0f} W")
+        return "\n".join(lines) if found else lines[0] + "\n" + L.t("ses_none")
 
     def alert_seconds(self, day_start: float, day_end: float) -> float:
         """Seconds of air-raid alert in the chosen region within a period."""

@@ -168,7 +168,8 @@ def start_schedule(tg: Telegram, schedule: Schedule, settings: Settings,
             off = sum((b - a) * 60 for a, b in windows(day.slots))
             if not rows:
                 return card(title, note=L.t("sc_no_off"))
-            return card(title, rows + [("⏱ " + L.t("t_off"), L.dur(off))])
+            on = sum((b - a) * 60 for a, b in windows(day.slots, "1"))
+            return card(title, rows + [("⏱ " + L.t("t_off"), L.dur(off)), ("⚡ " + L.t("t_on"), L.dur(on))])
         tg.send(text, rich=rich, thread="sched", end="sched")  # the newest schedule news only
 
     def on_soon(start: float, end: float) -> None:
@@ -265,8 +266,6 @@ async def run(args: argparse.Namespace) -> None:
     watchdog = Watchdog(tg, power, confirm_s=args.confirm, settings=settings, stats=stats,
                         full_confirm_s=args.full_confirm)
     watchdog.note = lambda L, kind, ts: alert_note(schedule, L, kind, ts)
-    if schedule:
-        watchdog.planned_off = schedule.planned_off
     peaks = LoadPeaks(tg, settings)
     extras = Extras(stats) if stats else None  # weather and air-raid alerts for the widgets and stats
     if extras:
@@ -305,6 +304,7 @@ async def run(args: argparse.Namespace) -> None:
         link_alerted = False
         snapshot: dict = {}
         last_plug: int | None = None
+        last_flag: bool | None = None
 
         def status_text(L: Lang) -> str:
             if not snapshot:
@@ -422,7 +422,7 @@ async def run(args: argparse.Namespace) -> None:
                 levels, packs = battery_state(data)
                 ac_in = as_int(data.get("ac_input_power", data.get("ac_input_power_total")))
                 charging = as_int(data.get("charging_status"))
-                remaining_h = data.get("remaining_time_hours")
+                remaining_h, on_grid_flag = remaining_and_grid(data.get("remaining_time_hours"))
                 if levels:
                     snapshot.update(at=now, wall=time.time(), levels=levels, ac_in=ac_in, remaining_h=remaining_h,
                                     out=as_int(data.get("output_power_total")))
@@ -445,12 +445,18 @@ async def run(args: argparse.Namespace) -> None:
                     # ac_input_plug_status (C1000 Gen 2, C2000 Gen 2, C300...): 1 = AC connected;
                     # these models have no charging_status, and with a full battery and a small
                     # load the AC input drops to 0 W while the grid is up
+                    if on_grid_flag != last_flag:
+                        log.info("remaining_time_hours says %s (ac_in %s W)",
+                                 "grid" if on_grid_flag else "battery" if on_grid_flag is False else "nothing", ac_in)
+                        last_flag = on_grid_flag
                     plug = as_int(data.get("ac_input_plug_status"))
-                    watchdog.plug_known = watchdog.plug_known or plug is not None
+                    # the remaining time tells the grid apart too (see remaining_and_grid), but only while
+                    # it is sent: with the AC output off the station sends none, then the wait is long again
+                    watchdog.plug_known = plug is not None or on_grid_flag is not None
                     if plug != last_plug:
                         log.info("ac_input_plug_status %s -> %s (ac_in %s W)", last_plug, plug, ac_in)
                         last_plug = plug
-                    grid = ac_in > 0 or charging in (2, 3) or plug == 1
+                    grid = ac_in > 0 or charging in (2, 3) or plug == 1 or on_grid_flag is True
                     if stats:
                         stats.add_reading(ac_in, as_int(data.get("output_power_total")) or 0,
                                           round(sum(levels.values()) / len(levels)), grid)
@@ -461,6 +467,26 @@ async def run(args: argparse.Namespace) -> None:
             # keep re-evaluating so the outage confirm timer runs between messages
             if watchdog.no_grid_since is not None and not watchdog.on_battery and last_levels:
                 watchdog.evaluate(False, 0, last_levels, load=last_load)
+
+
+GRID_HOURS = 500  # remaining_time_hours above this: the battery is not being used, so the grid is up
+
+
+def remaining_and_grid(value) -> tuple[float | None, bool | None]:
+    """remaining_time_hours -> (hours left on the battery, what it says about the grid).
+
+    The C1000(X) sends its runtime left on the battery: on the battery 16-180 h even at 0 W (its
+    own draw), when full on the grid hundreds or thousands of hours, or 6553.5 (0xFFFF / 10,
+    "none"), as the battery is not used; while charging, the time to full. At zero load and full
+    charge the station takes nothing from the grid for hours, so this is the one sign of the grid
+    then. True: the grid, False: the battery, None: not reported."""
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        return None, None
+    if hours >= GRID_HOURS:
+        return None, True
+    return hours, False if hours > 0 else None
 
 
 def apply_timezone() -> None:

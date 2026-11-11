@@ -3,7 +3,8 @@
 Telegram alerts for Anker SOLIX portable power stations used as a UPS.
 
 - Alert when the station loses AC input (with how long the grid was up) and when grid power
-  comes back (with the outage duration)
+  comes back (with the outage duration, the load during it and the energy used); the alerts of
+  one outage are cards that the closing one replaces, so the chat keeps one summary per outage
 - Full-charge alert once the station has recharged to 100 % after an outage (once per outage)
 - Charge alerts for the main battery and each expansion battery (default 75 / 50 / 25 %)
 - Critical charge alert (Telegram + topmost Windows popup) at a configurable level
@@ -35,8 +36,10 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   the bot turns the 12V output on, and off again when the power is back or the hours end
 - **📈 Stats** button: load / grid input / charge charts for 24 h and 7 days (with the energy and
   its cost), and tables: outages by day, outages and energy by month, energy through the station
-  (kWh in / out and the cost at your tariff, 4.32 UAH/kWh by default); a daily summary with a
-  chart (data is kept in `anker_ups.db` next to the script)
+  (kWh in / out and the cost at your tariff, 4.32 UAH/kWh by default), and load sessions (long
+  runs of load above 50–200 W, e.g. a PC: time, kWh, cost, average / peak load, for today,
+  yesterday, 7 or 30 days or typed dates); a daily summary with a chart (data is kept in
+  `anker_ups.db` next to the script)
 - **🔥 High load** alerts (a kettle, a heater): when it starts and / or a summary when it ends,
   with the energy and its cost; threshold and mode in **⚙️ Settings → 🔔 Notifications**
 - Before a planned outage: the charge the battery will have by then and, if it would not be
@@ -66,8 +69,10 @@ expansion battery**; other models use the same field names but have not been tes
 
 Grid loss is detected from the AC input power, plus the charging status or the AC input plug
 status where the model reports them (e.g. C1000 Gen 2 and C2000 Gen 2 report the plug status).
-Models that report neither may show 0 W input with a full battery and a small load while the
-grid is up; keep a load on the station or check the log before relying on it.
+A full C1000(X) with no load takes nothing from the grid for hours; there the remaining time it
+reports tells the grid apart (tens of hours on the battery, thousands or "none" on the grid). With
+its AC output off it reports no remaining time, so then the bot waits 20 minutes without input
+before an outage alert. Other models without these fields may need a load on the station.
 
 ## Setup
 

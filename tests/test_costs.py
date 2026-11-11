@@ -139,3 +139,63 @@ def test_daily_summary_card(stats):
     fill(stats, 5, 100, 50, 60, 60)
     html = stats.summary_card(datetime.now(), EN)
     assert html.startswith("<h3>📅 Last 24 h</h3><table bordered>") and "avg" in html and "<footer>" in html
+
+
+def test_load_sessions_merge_short_dips_and_skip_short_runs(stats):
+    end = time.time() - 3 * 3600
+    fill(stats, 60, 0, 105, 100, 100, end=end - 60 * 60)  # an idle PC: above 80 W, below 150 W
+    fill(stats, 5, 0, 60, 100, 100, end=end - 55 * 60)  # a 5-minute dip does not split the session
+    fill(stats, 55, 0, 300, 100, 100, end=end)  # then a game
+    fill(stats, 20, 0, 400, 100, 100, end=end + 60 * 60)  # 20 min after a 40-min gap: too short
+    found = stats.sessions(80, end - 4 * 3600)
+    assert len(found) == 1
+    s = found[0]
+    assert round((s["end"] - s["start"]) / 60) == 120 and s["heavy"] == 55 * 60
+    assert round(s["wh"]) == round((60 * 105 + 5 * 60 + 55 * 300) / 60) and s["peak"] == 300
+    assert stats.sessions(150, end - 4 * 3600)[0]["heavy"] == 55 * 60  # only the game part
+    start = end - 5 * 3600
+    html = stats.sessions_html(EN, 4.32, 80, start, time.time(), "Today")
+    assert "Load sessions ≥80 W · Today" in html and "<td>2h 00m</td>" in html and "<td>55m</td>" in html
+    assert "<th><b>≥150 W</b></th>" in html and "<footer>Total: 1," in html and "<th><b>Day" not in html
+    assert "<th><b>≥150 W" not in stats.sessions_html(EN, 4.32, 150, start, time.time(), "Today")
+    assert "<th><b>Day" in stats.sessions_html(EN, 4.32, 80, start - 7 * 86400, time.time(), "7 days")
+    fill(stats, 40, 0, 120, 100, 100, end=end - 2 * 3600 - 15 * 60)  # an earlier session the same day
+    week = stats.sessions_html(EN, 4.32, 80, start - 7 * 86400, time.time(), "7 days")
+    assert week.count(time.strftime("%d.%m", time.localtime(end)) + "</td>") == 1 and '<td rowspan="2" valign="middle">' in week
+    assert "No sessions" in stats.sessions_html(EN, 4.32, 80, end + 3600, time.time(), "x")
+
+
+def test_session_periods_and_typed_ranges():
+    from datetime import datetime
+
+    from ankerups.stats import parse_range, session_period
+    now = datetime(2026, 11, 11, 15, 0)
+    assert parse_range("05.11", now) == "20261105-20261105"
+    assert parse_range("8.11 – 5.11", now) == "20261105-20261108"
+    assert parse_range("28.12", now) == "20251228-20251228"  # not ahead: last year
+    assert parse_range("01.01.2026-30.06.2026", now) is None  # over 3 months
+    assert parse_range("hello", now) is None and parse_range("31.02", now) is None
+    a, b, label = session_period("20261105-20261108", EN, now)
+    assert label == "05.11–08.11" and b - a == 4 * 86400
+    a, b, label = session_period("yday", EN, now)
+    assert label == "Yesterday" and b - a == 86400 and datetime.fromtimestamp(b) == datetime(2026, 11, 11)
+
+
+def test_sessions_buttons_periods_and_typed_dates(bot: FakeBot, stats, settings):
+    bot.handlers.stats = stats
+    fill(stats, 40, 0, 120, 100, 100)
+    calls = bot.press(bot.ADMIN, "stats:sessions")
+    rich = dict(calls)["sendRichMessage"]
+    markup = json.dumps(json.loads(rich["reply_markup"]), ensure_ascii=False)
+    assert "≥80 W · Today" in json.loads(rich["rich_message"])["html"] and "•80W" in markup and "•Today" in markup
+    calls = bot.press(bot.ADMIN, "stats:sessions:7:150")
+    rich = dict(calls)["sendRichMessage"]
+    assert settings.get("session_w") == "150" and "· 7 days" in json.loads(rich["rich_message"])["html"]
+    assert "deleteMessage" in dict(calls)  # the old table goes
+    calls = bot.press(bot.ADMIN, "stats:sessions:ask:150")
+    assert "Type a day or a period" in texts(calls)[0]
+    calls = bot.message(bot.ADMIN, "no idea")
+    assert texts(calls)[0].startswith("Not a date")
+    day = time.strftime("%d.%m")
+    calls = bot.message(bot.ADMIN, day)
+    assert f"≥150 W · {day}" in json.loads(dict(calls)["sendRichMessage"]["rich_message"])["html"]

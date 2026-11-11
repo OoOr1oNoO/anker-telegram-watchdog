@@ -14,10 +14,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .common import log
+from .common import as_int, log
 from .i18n import Lang, Render, lang
 from .menus import TEXT_SETTINGS, Controller, Ctx, paint
-from .stats import Stats, chart_title
+from .stats import SESSION_CHOICES, SESSION_PERIODS, Settings, Stats, chart_title, parse_range, session_period
 from .translations import LANG_NAMES, LANGS
 from .users import ACCESS_MODES, ACTIVE_ROLES, Users, chat_name
 from . import widget_clock, widget_ios, widget_quick
@@ -116,7 +116,19 @@ def stats_menu(L: Lang) -> str:
          {"text": L.t("chart7"), "callback_data": "stats:chart168"}],
         [{"text": L.t("outages"), "callback_data": "stats:outages"},
          {"text": L.t("energy"), "callback_data": "stats:energy"},
-         {"text": L.t("months"), "callback_data": "stats:months"}]]})
+         {"text": L.t("months"), "callback_data": "stats:months"}],
+        [{"text": L.t("sessions"), "callback_data": "stats:sessions"}]]})
+
+
+def sessions_menu(L: Lang, period: str, w: int) -> str:
+    """The periods and thresholds under the sessions table; a press sends it again in its place."""
+    names = {"today": L.t("p_today"), "yday": L.t("p_yday"), "7": L.t("p_7d"), "30": L.t("p_30d")}
+    return json.dumps({"inline_keyboard": [
+        [{"text": ("•" if p == period else "") + names[p], "callback_data": f"stats:sessions:{p}:{w}"}
+         for p in SESSION_PERIODS] + [{"text": ("•" if period not in names else "") + "✏️",
+                                       "callback_data": f"stats:sessions:ask:{w}"}],
+        [{"text": ("•" if c == w else "") + f"{c}W", "callback_data": f"stats:sessions:{period}:{c}"}
+         for c in SESSION_CHOICES]]})
 
 
 class Telegram:
@@ -219,7 +231,8 @@ class Telegram:
             L = lang(code) if code else self.lang_of(chat)
             if kind == "rich":  # a rich message (tables); the text version if it is refused
                 try:
-                    self._deliver_rich(chat, payload(L), extra(L), self.keyboard(L))
+                    fallback, markup = extra
+                    self._deliver_rich(chat, payload(L), fallback(L), markup(L) if markup else self.keyboard(L))
                 except Exception:
                     log.exception("Rich message failed")
                 continue
@@ -247,10 +260,15 @@ class Telegram:
                 log.exception("Telegram message rendering failed")
                 continue
             sent = None
-            if rich and not self._blocked(chat):
+            if rich:  # tried even under flood control: Telegram lets some messages through
                 try:
                     sent = self._call("sendRichMessage", {"chat_id": chat, "reply_markup": args[1],
                                                           "rich_message": json.dumps({"html": rich(L)})})["result"]
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 403:  # the user blocked the bot or it left the group: text fails too
+                        log.warning("Rich alert to %s refused (403), skipping", chat)
+                        continue
+                    log.warning("Rich alert to %s failed (%s), sending text", chat, exc)
                 except Exception as exc:
                     log.warning("Rich alert to %s failed (%s), sending text", chat, exc)
             if sent is None:
@@ -337,9 +355,10 @@ class Telegram:
                 log.warning("Telegram send failed (%s), retrying in 15s", exc)
             time.sleep(15)
 
-    def reply_rich(self, chat: str, html: Render, fallback: Render) -> None:
+    def reply_rich(self, chat: str, html: Render, fallback: Render, markup: Render | None = None) -> None:
+        """A rich message (tables); markup: its inline buttons instead of the reply keyboard."""
         if self.enabled:
-            self.queue.put(("rich", html, fallback, chat, None, False))
+            self.queue.put(("rich", html, (fallback, markup), chat, None, False))
 
     def _deliver_rich(self, chat: str, html: str, fallback: str, markup: str) -> None:
         try:
@@ -496,7 +515,18 @@ class Telegram:
                 except Exception:
                     log.exception("Telegram update handling failed")
 
-    def _handle_stats(self, chat: str, action: str, stats: "Stats", L: Lang, tariff: float) -> str:
+    def _handle_stats(self, chat: str, action: str, stats: "Stats", L: Lang, settings: "Settings") -> str:
+        tariff = settings.tariff
+        if action.startswith("sessions"):
+            _, period, choice = (action.split(":") + ["", ""])[:3]
+            if choice.isdigit() and int(choice) in SESSION_CHOICES:
+                settings.set("session_w", choice)
+            if period == "ask":  # a period of its own: typed as dates
+                self.awaiting[(chat, chat)] = ("sessions", time.time())
+                self.reply(chat, L.t("ses_ask"), FORCE_REPLY)
+                return ""
+            self.send_sessions(chat, stats, settings, period or "today")
+            return L.t("sent")
         if action.startswith("chart"):
             hours = int(action.removeprefix("chart"))
             if stats.chart_png(hours, L) is None:
@@ -512,6 +542,17 @@ class Telegram:
         if action in rich:
             self.reply_rich(chat, *rich[action])
         return L.t("sent")
+
+    def send_sessions(self, chat: str, stats: "Stats", settings: "Settings", period: str) -> None:
+        w, tariff = as_int(settings.get("session_w")) or 80, settings.tariff
+
+        def show(render):
+            def text(L: Lang) -> str:
+                start, end, label = session_period(period, L) or session_period("today", L)
+                return render(L, tariff, w, start, end, label)
+            return text
+        self.reply_rich(chat, show(stats.sessions_html), show(stats.sessions_text),
+                        lambda L: sessions_menu(L, period, w))
 
     def _edit(self, msg: dict, view: tuple[str, str | None]) -> None:
         params = {"chat_id": msg["chat"]["id"], "message_id": msg.get("message_id"), "text": view[0],
@@ -560,6 +601,15 @@ class Telegram:
         users.note(chat, chat_name(chat_obj, sender), sender.get("language_code"),
                    chat_obj.get("type") == "private")
         L = users.lang(chat)
+        if not action and self.awaiting.get((chat, chat), ("",))[0] == "sessions" and h.stats:
+            _, asked = self.awaiting.pop((chat, chat))
+            period = parse_range(text) if time.time() - asked < 600 else None
+            if period:
+                self.send_sessions(chat, h.stats, h.controller.settings, period)
+            elif time.time() - asked < 600:
+                self.awaiting[(chat, chat)] = ("sessions", time.time())
+                self.reply(chat, L.t("ses_bad"), FORCE_REPLY)
+            return
         if not action and (chat, user) in self.awaiting and self.awaiting[(chat, user)][0] in TEXT_SETTINGS:
             kind, asked = self.awaiting.pop((chat, user))
             if time.time() - asked < 600 and users.is_admin(user):
@@ -671,7 +721,10 @@ class Telegram:
                 toast = ctx.L.t("only_admins")
                 log.info("Denied %s:%s from user %s", kind, rest, user)
             elif kind == "stats" and h.stats:
-                toast = self._handle_stats(chat, rest, h.stats, ctx.L, h.controller.settings.tariff)
+                toast = self._handle_stats(chat, rest, h.stats, ctx.L, h.controller.settings)
+                if rest.count(":") == 2 and not rest.startswith("sessions:ask"):  # sent again: drop the old one
+                    with contextlib.suppress(Exception):
+                        self._call("deleteMessage", {"chat_id": chat, "message_id": msg.get("message_id")})
             elif kind == "m":
                 self._edit(msg, h.controller.render(rest, ctx))
             elif kind == "l":
