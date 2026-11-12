@@ -67,10 +67,13 @@ def test_outage_on_full_idle_station_after_three_minutes_with_start_time(run):
     assert text.startswith("🔌 Station lost AC input at ")
 
 
-def test_outage_with_load_after_ten_seconds(run):
+def test_full_station_with_load_waits_30_seconds(run):
     run(20, 120, FULL, load=120)
-    run(20, 0, FULL, load=120)
-    assert [at for at, _ in run.sent] == [32]
+    run(12, 0, FULL, load=120)  # a few seconds without input while the grid is up: nothing
+    run(20, 120, FULL, load=120)
+    assert run.sent == []
+    run(40, 0, FULL, load=120)
+    assert [at for at, _ in run.sent] == [84]
 
 
 def test_outage_below_full_after_ten_seconds(run):

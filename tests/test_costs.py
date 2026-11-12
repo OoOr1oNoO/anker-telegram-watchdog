@@ -199,3 +199,28 @@ def test_sessions_buttons_periods_and_typed_dates(bot: FakeBot, stats, settings)
     day = time.strftime("%d.%m")
     calls = bot.message(bot.ADMIN, day)
     assert f"≥150 W · {day}" in json.loads(dict(calls)["sendRichMessage"]["rich_message"])["html"]
+
+
+def test_database_backup_button(bot: FakeBot, stats):
+    import sqlite3
+    bot.handlers.stats = stats
+    fill(stats, 5, 100, 50, 60, 60)
+    sent = []
+    bot.tg._upload = lambda method, field, name, ctype, data, chat, caption, markup=None: sent.append((method, name, data, caption))
+    calls = bot.press(bot.ADMIN, "stats:backup")
+    assert toast(calls) == "Sent" and sent[0][0] == "sendDocument" and sent[0][1].endswith(".db")
+    assert sent[0][2].startswith(b"SQLite format 3") and "KB" in sent[0][3]
+    db = sqlite3.connect(":memory:")
+    db.deserialize(sent[0][2])
+    assert db.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 5
+
+
+def test_voltage_in_the_daily_summary(stats):
+    from datetime import datetime
+    fill(stats, 60, 100, 50, 60, 60)
+    now = time.time()
+    for i, v in enumerate((231, 214, 238)):
+        stats.add_voltage(v, now - (i + 1) * 120)
+    html = stats.summary_card(datetime.now(), EN)
+    assert "<td>🔋 Grid voltage</td><td>214–238 V</td>" in html
+    assert stats.voltage_range(now - 3600, now) == (214, 238) and stats.voltage_range(0, 1) is None

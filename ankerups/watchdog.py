@@ -103,6 +103,9 @@ def show_popup(title: str, text: str) -> None:
                      args=(None, text, title, flags), daemon=True).start()
 
 
+FULL_PASS_CONFIRM_S = 30  # s without input before an outage when the battery is full
+
+
 class Watchdog:
     def __init__(self, tg: Telegram, power: PowerPlan, confirm_s: float, settings: Settings,
                  name: str = "Anker", stats: Stats | None = None, full_confirm_s: float = 180,
@@ -226,6 +229,10 @@ class Watchdog:
         if self.no_grid_since is None:
             self.no_grid_since = now
         wait = self.confirm_s
+        if min(levels.values()) >= 100 and not self.plug_known:
+            # a full station passing the grid through to a load drops its input for a few seconds now
+            # and then (seen: 6 s at 38 W) while the grid is up: a little longer to confirm
+            wait = max(wait, FULL_PASS_CONFIRM_S)
         if min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W and not self.plug_known:
             # a full idle station takes its few watts in pulses minutes apart (seen up to 14 min)
             # with the grid up; the schedule is not trusted here, it is often not kept

@@ -14,7 +14,7 @@ class FakeTv:
     """adb_shell's device: answers dumpsys power and key events."""
 
     def __init__(self):
-        self.awake, self.cmds, self.fail, self.vol = True, [], False, 29
+        self.awake, self.cmds, self.fail, self.vol, self.bl = True, [], False, 29, 30
 
     def shell(self, cmd, read_timeout_s=None):
         if self.fail:
@@ -24,6 +24,10 @@ class FakeTv:
             self.awake = False
         if "KEYCODE_WAKEUP" in cmd:
             self.awake = True
+        if "picture_backlight" in cmd:
+            if "put" in cmd:
+                self.bl = int(cmd.split()[-1])
+            return f"{self.bl}\n"
         if "--set" in cmd:
             self.vol = int(cmd.split()[-1])
         if "--get" in cmd:
@@ -133,7 +137,8 @@ def test_remote_widget(settings, bot):
     bot.controller.tv = c.tv
     calls = bot.press(bot.ADMIN, "a:tv:remote")
     sent = dict(calls)["sendWidget"]
-    assert "data-k=ok" in sent["html"] and sent["chat_data"] == '{"at":0,"v":29,"vm":100}'
+    assert "data-k=ok" in sent["html"] and sent["chat_data"] == '{"at":0,"v":29,"vm":100,"b":30}'
+    assert c.quick_action("tv:bl:0", ctx) == "" and dev.bl == 0 and c.tv.backlight() == 0
     assert c.tv.volume() == (29, 100) and c.quick_action("tv:vol:40", ctx) == "" and dev.vol == 40
     assert c.quick_action("tv:timer:40", ctx) == "" and 2390 < float(settings.get("tv_off_at")) - time.time() <= 2400
     assert '"at":' in dict(bot.press(bot.ADMIN, "a:tv:remote"))["sendWidget"]["chat_data"]

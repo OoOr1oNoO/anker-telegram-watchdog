@@ -383,6 +383,8 @@ async def run(args: argparse.Namespace) -> None:
         controller.plug = Plug.from_env(os.environ)  # optional Tuya smart plug
         if controller.plug:
             log.info("Tuya plug %s…", controller.plug.device[:6])
+        if controller.plug and stats:
+            watch_voltage(controller.plug, stats)
         controller.tv = Tv.from_env(os.environ, data_dir())  # optional Android TV over ADB
         if controller.tv:
             controller.tv.start_timer(settings)
@@ -509,6 +511,29 @@ async def run(args: argparse.Namespace) -> None:
 
 PACK_WH = 1056  # Wh of a C1000(X) and of its expansion battery
 SELF_DRAW_W = 10  # W the battery spends beyond the load: on the battery 22-31 at a small load, on the grid 0-5
+VOLT_LOW, VOLT_HIGH, VOLT_JUMP = 205, 245, 10  # V: logged when outside these or after a jump
+
+
+def watch_voltage(plug, stats) -> None:
+    """The grid voltage from the plug once a minute into the stats; odd values go to the log too
+    (to tell a real drop from a false outage alert afterwards)."""
+    def loop() -> None:
+        last = None
+        while True:
+            try:
+                load = plug.load()
+                if load and load[1]:
+                    volts = load[1]
+                    stats.add_voltage(volts)
+                    if not VOLT_LOW <= volts <= VOLT_HIGH or (last and abs(volts - last) >= VOLT_JUMP):
+                        log.info("Grid voltage %s V (was %s V)", volts, last)
+                    last = volts
+            except Exception as exc:
+                log.debug("Voltage reading failed: %s", exc)
+            time.sleep(60)
+    threading.Thread(target=loop, daemon=True, name="voltage").start()
+
+
 def api_routes(controller: Controller, watchdog: Watchdog, snapshot: dict, tg: Telegram,
                schedule=None, extras=None) -> dict:
     """The routes of the Siri / Shortcuts API (api.Api): station switches, the plug, the TV, a status
@@ -576,7 +601,8 @@ def api_routes(controller: Controller, watchdog: Watchdog, snapshot: dict, tg: T
             return done(q, state is not None and tv.power(not state))
         routes |= {"tv/on": lambda q: done(q, tv.power(True)), "tv/off": lambda q: done(q, tv.power(False)),
                    "tv/toggle": toggle, "tv/pause": lambda q: done(q, tv.press("play")),
-                   "tv/timer": timer, "tv/volume": volume}
+                   "tv/timer": timer, "tv/volume": volume,
+                   "tv/backlight": lambda q: done(q, q.get("v", "").isdigit() and tv.set_backlight(int(q["v"])))}
     return routes
 
 

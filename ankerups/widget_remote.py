@@ -21,37 +21,39 @@ ICONS = {
 }
 
 TEMPLATE = """<style>
-body{margin:12px 14px;user-select:none;-webkit-user-select:none}
+body{margin:10px 12px;user-select:none;-webkit-user-select:none}
 .r{display:flex;justify-content:space-between;align-items:center}
 .t{font-weight:700;font-size:17px}
 b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;cursor:pointer;
 background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color);transition:transform .08s,background .08s}
 b.p{transform:scale(.9);background:#3a3a3c}
-.pw{width:44px;height:44px;color:#ff453a}
-.pad{position:relative;width:210px;height:210px;margin:14px auto 0;border-radius:50%;background:var(--tg-theme-secondary-bg-color)}
-.pad b{position:absolute;width:58px;height:58px;background:transparent}
-.pad .ok{left:62px;top:62px;width:86px;height:86px;background:var(--tg-theme-bg-color);font-weight:700;font-size:17px}
-.row{display:flex;justify-content:space-between;margin:16px 6px 0}
-.row b{width:56px;height:56px}
-.cd{background:var(--tg-theme-secondary-bg-color);border-radius:16px;padding:10px 12px;margin-top:16px}
+.pw{width:38px;height:38px;color:#ff453a}
+.pad{position:relative;width:170px;height:170px;margin:8px auto 0;border-radius:50%;background:var(--tg-theme-secondary-bg-color)}
+.pad b{position:absolute;width:48px;height:48px;background:transparent}
+.pad .ok{left:50px;top:50px;width:70px;height:70px;background:var(--tg-theme-bg-color);font-weight:700;font-size:17px}
+.row{display:flex;justify-content:space-between;margin:10px 6px 0}
+.row b{width:46px;height:46px}
+.cd{background:var(--tg-theme-secondary-bg-color);border-radius:14px;padding:6px 12px;margin-top:8px}
 .k{font-size:13px;font-weight:600}.v{font-size:15px;font-weight:700}
-.tr{position:relative;height:30px;margin:8px 4px 0;touch-action:none}
-.tr .bg{position:absolute;left:0;right:0;top:12px;height:6px;border-radius:3px;background:#3a3a3c}
-.tr .fl{position:absolute;top:12px;height:6px;border-radius:3px;background:#ff9f0a}#vf{background:#0a84ff}
-.tr .kn{position:absolute;top:3px;width:24px;height:24px;margin-left:-12px;border-radius:12px;background:#fff}
+.tr{position:relative;height:24px;margin:2px 4px 0;touch-action:none}
+.tr .bg{position:absolute;left:0;right:0;top:9px;height:6px;border-radius:3px;background:#3a3a3c}
+.tr .fl{position:absolute;top:9px;height:6px;border-radius:3px;background:#ff9f0a}#vf{background:#0a84ff}#bf{background:#ffd60a}
+.tr .kn{position:absolute;top:2px;width:20px;height:20px;margin-left:-10px;border-radius:10px;background:#fff}
 </style>
 <div class=r><span class=t>__NAME__</span><b class=pw data-k=power>__power__</b></div>
 <div class=pad>
-<b data-k=up style="left:76px;top:4px">__up__</b><b data-k=left style="left:4px;top:76px">__left__</b>
-<b data-k=right style="right:4px;top:76px">__right__</b><b data-k=down style="left:76px;bottom:4px">__down__</b>
+<b data-k=up style="left:61px;top:3px">__up__</b><b data-k=left style="left:3px;top:61px">__left__</b>
+<b data-k=right style="right:3px;top:61px">__right__</b><b data-k=down style="left:61px;bottom:3px">__down__</b>
 <b class=ok data-k=ok>OK</b></div>
 <div class=row><b data-k=back>__back__</b><b data-k=home>__home__</b><b data-k=play>__play__</b><b data-k=mute>__mute__</b></div>
 <div class=cd id=vc><div class=r><span class=k>__VOLUME__</span><span class=v id=vv></span></div>
 <div class=tr id=vt><div class=bg></div><div class=fl id=vf></div><div class=kn id=vk></div></div></div>
+<div class=cd id=bc><div class=r><span class=k>__LIGHT__</span><span class=v id=bv></span></div>
+<div class=tr id=bt><div class=bg></div><div class=fl id=bf></div><div class=kn id=bk></div></div></div>
 <div class=cd><div class=r><span class=k>__TIMER__</span><span class=v id=tv></span></div>
 <div class=tr id=tt><div class=bg></div><div class=fl id=tf></div><div class=kn id=tk></div></div></div>
 <script>
-var W=TelegramWidget,L=__LABELS__,$=function(i){return document.getElementById(i)},D={},AT=0,M=0,V=0;
+var W=TelegramWidget,L=__LABELS__,$=function(i){return document.getElementById(i)},D={},AT=0,M=0,V=0,B=0;
 document.querySelectorAll("b[data-k]").forEach(function(b){b.addEventListener("click",function(){
 var k=b.getAttribute("data-k");b.className+=" p";setTimeout(function(){b.className=b.className.replace(" p","")},150);
 W.request(k=="power"?"tv:power":"tv:k"+k)})});
@@ -60,13 +62,14 @@ function left(){return AT?Math.min(240,Math.max(0,Math.ceil((AT-Date.now()/1000)
 function bar(i,f){$(i+"k").style.left=f*100+"%";$(i+"f").style.width=f*100+"%"}
 function draw(){var t=new Date(AT*1000);bar("t",M/240);
 $("tv").textContent=M?Math.floor(M/60)+":"+p2(M%60)+" → "+p2(t.getHours())+":"+p2(t.getMinutes()):L.off;
-if(D.vm){bar("v",V/D.vm);$("vv").textContent=V}}
+if(D.vm){bar("v",V/D.vm);$("vv").textContent=V}if(D.b!=null){bar("b",B/100);$("bv").textContent=B||L.dark}}
 function slide(i,set,done){var el=$(i+"t"),on=false;function x(e){var r=el.getBoundingClientRect();return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))}
 el.addEventListener("pointerdown",function(e){on=true;set(x(e));draw()});el.addEventListener("pointermove",function(e){if(on){set(x(e));draw()}});
 function end(){if(on){on=false;done()}}el.addEventListener("pointerup",end);el.addEventListener("pointercancel",end)}
 slide("t",function(f){M=Math.round(f*24)*10;AT=M?Date.now()/1000+M*60:0},function(){W.request("tv:timer:"+M)});
 slide("v",function(f){V=Math.round(f*D.vm)},function(){W.request("tv:vol:"+V)});
-try{D=JSON.parse(W.chatData||"{}")}catch(e){}AT=D.at||0;M=left();V=D.v||0;if(!D.vm)$("vc").style.display="none";draw();
+slide("b",function(f){B=Math.round(f*20)*5},function(){W.request("tv:bl:"+B)});
+try{D=JSON.parse(W.chatData||"{}")}catch(e){}AT=D.at||0;M=left();V=D.v||0;B=D.b||0;if(!D.vm)$("vc").style.display="none";if(D.b==null)$("bc").style.display="none";draw();
 setInterval(function(){if(AT){M=left();if(!M)AT=0;draw()}},30000);W.ready()
 </script>"""
 
@@ -78,13 +81,16 @@ def _esc(text: str) -> str:
 def widget_html(L: Lang, name: str) -> str:
     html = (TEMPLATE.replace("__NAME__", "📺 " + _esc(name or L.t("tv")))
             .replace("__TIMER__", "⏲ " + _esc(L.t("pl_r_timer"))).replace("__VOLUME__", "🔊 " + _esc(L.t("tv_volume")))
-            .replace("__LABELS__", json.dumps({"off": L.t("off")}, ensure_ascii=False)))
+            .replace("__LIGHT__", "☀️ " + _esc(L.t("tv_backlight")))
+            .replace("__LABELS__", json.dumps({"off": L.t("off"), "dark": L.t("tv_dark")}, ensure_ascii=False)))
     for key, path in ICONS.items():
         html = html.replace(f"__{key}__", S + path + "</svg>")
     return html
 
 
-def remote_data(off_at: float, volume: tuple[int, int] | None = None) -> str:
-    """The widget's data: when the off timer fires (0: no timer) and the volume with its maximum."""
-    data = {"at": int(off_at)} | ({"v": volume[0], "vm": volume[1]} if volume else {})
+def remote_data(off_at: float, volume: tuple[int, int] | None = None, backlight: int | None = None) -> str:
+    """The widget's data: when the off timer fires (0: no timer), the volume with its maximum and the
+    backlight (each left out when not known)."""
+    data = ({"at": int(off_at)} | ({"v": volume[0], "vm": volume[1]} if volume else {})
+            | ({"b": backlight} if backlight is not None else {}))
     return json.dumps(data, separators=(",", ":"))

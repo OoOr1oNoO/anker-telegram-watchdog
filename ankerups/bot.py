@@ -117,7 +117,8 @@ def stats_menu(L: Lang) -> str:
         [{"text": L.t("outages"), "callback_data": "stats:outages"},
          {"text": L.t("energy"), "callback_data": "stats:energy"},
          {"text": L.t("months"), "callback_data": "stats:months"}],
-        [{"text": L.t("sessions"), "callback_data": "stats:sessions"}]]})
+        [{"text": L.t("sessions"), "callback_data": "stats:sessions"}],
+        [{"text": L.t("backup"), "callback_data": "stats:backup"}]]})
 
 
 def sessions_menu(L: Lang, period: str, w: int) -> str:
@@ -172,19 +173,36 @@ class Telegram:
             return json.loads(resp.read())
 
     def _send_photo(self, chat: str, png: bytes, caption: str, markup: str) -> None:
+        self._upload("sendPhoto", "photo", "chart.png", "image/png", png, chat, caption, markup)
+
+    def _upload(self, method: str, field: str, filename: str, ctype: str, data: bytes, chat: str,
+                caption: str, markup: str | None = None) -> None:
         boundary = f"----anker{int(time.time() * 1000)}"
         parts = []
         for name, value in (("chat_id", chat), ("caption", caption), ("reply_markup", markup)):
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
-                         f"{value}\r\n".encode())
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; '
-                     f'filename="chart.png"\r\nContent-Type: image/png\r\n\r\n'.encode()
-                     + png + b"\r\n")
+            if value:
+                parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+                             f"{value}\r\n".encode())
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+                     f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'.encode() + data + b"\r\n")
         parts.append(f"--{boundary}--\r\n".encode())
-        req = urllib.request.Request(f"{self.base}/sendPhoto", data=b"".join(parts),
+        req = urllib.request.Request(f"{self.base}/{method}", data=b"".join(parts),
                                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             resp.read()
+
+    def send_backup(self, chat: str, stats: "Stats", L: Lang) -> bool:
+        """The database as a file in the chat: Telegram keeps it (an admin's button in 📈 Stats)."""
+        try:
+            data = stats.backup_bytes()
+            name = time.strftime("anker_ups-%Y%m%d-%H%M.db")
+            self._upload("sendDocument", "document", name, "application/x-sqlite3", data, chat,
+                         L.t("backup_cap", name=name, when=time.strftime("%d.%m.%Y %H:%M"), kb=len(data) // 1024))
+            log.info("Database backup sent to %s (%d KB)", chat, len(data) // 1024)
+            return True
+        except Exception as exc:
+            log.warning("Database backup to %s failed: %s", chat, exc)
+            return False
 
     def lang_of(self, chat: str) -> Lang:
         return self.users.lang(chat) if self.users else self.default
@@ -743,6 +761,9 @@ class Telegram:
             if kind in ("a", "u", "g") and not ctx.admin:
                 toast = ctx.L.t("only_admins")
                 log.info("Denied %s:%s from user %s", kind, rest, user)
+            elif kind == "stats" and rest == "backup" and h.stats:  # the database file: admins only
+                toast = (ctx.L.t("sent") if self.send_backup(chat, h.stats, ctx.L) else ctx.L.t("cmd_failed")) \
+                    if ctx.admin else ctx.L.t("only_admins")
             elif kind == "stats" and h.stats:
                 toast = self._handle_stats(chat, rest, h.stats, ctx.L, h.controller.settings)
                 if rest.count(":") == 2 and not rest.startswith("sessions:ask"):  # sent again: drop the old one
@@ -763,7 +784,7 @@ class Telegram:
                 else:
                     name = h.controller.tv.name or ctx.L.t("tv")
                     data = widget_remote.remote_data(float(h.controller.settings.get("tv_off_at") or 0),
-                                                     h.controller.tv.volume())
+                                                     h.controller.tv.volume(), h.controller.tv.backlight())
                     self.send_widget(chat, lambda: (name, data), lambda L: h.controller.render("tv", ctx)[0], "remote")
             elif kind == "a":
                 key, _, value = rest.partition(":")

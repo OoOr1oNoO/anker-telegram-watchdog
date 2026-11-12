@@ -116,6 +116,15 @@ class Tv:
         m = re.search(r"volume is (\d+) in range \[\d+\.\.(\d+)\]", out or "")
         return (int(m[1]), int(m[2])) if m else None
 
+    def backlight(self) -> int | None:
+        """The panel backlight 0-100 (Xiaomi's picture_backlight), None if not known."""
+        out = (self._shell("settings get global picture_backlight") or "").strip()
+        return int(out) if out.isdigit() else None
+
+    def set_backlight(self, value: int) -> bool:
+        """0 leaves the screen practically dark with the sound on."""
+        return self._shell(f"settings put global picture_backlight {max(0, min(100, int(value)))}") is not None
+
     def step_volume(self, delta: int) -> bool:
         """Volume up or down by delta (a button in chats without widgets: one key press is too small)."""
         vol = self.volume()

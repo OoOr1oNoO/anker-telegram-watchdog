@@ -107,6 +107,7 @@ class Stats:
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS samples (ts INTEGER PRIMARY KEY, ac_in REAL, out REAL,
                                                 soc INTEGER, grid INTEGER);
+            CREATE TABLE IF NOT EXISTS voltage (ts INTEGER PRIMARY KEY, v REAL);
             CREATE TABLE IF NOT EXISTS outages (id INTEGER PRIMARY KEY, start INTEGER,
                                                 end INTEGER, soc_start INTEGER, soc_end INTEGER);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -131,6 +132,15 @@ class Stats:
             self.acc = []
         self.minute = minute
         self.acc.append((ac_in or 0, out or 0, soc, grid))
+
+    def add_voltage(self, volts: float, ts: float | None = None) -> None:
+        """The grid voltage once a minute (from the smart plug: the station does not report it)."""
+        self._exec("INSERT OR REPLACE INTO voltage VALUES (?, ?)", (int((ts or time.time()) // 60 * 60), volts))
+
+    def voltage_range(self, start: float, end: float) -> tuple[float, float] | None:
+        rows = self._exec("SELECT MIN(v), MAX(v) FROM voltage WHERE ts >= ? AND ts < ? AND v > 0",
+                          (int(start), int(end)))
+        return (rows[0][0], rows[0][1]) if rows and rows[0][0] is not None else None
 
     def meta(self, key: str, value: str | None = None) -> str | None:
         if value is not None:
@@ -185,6 +195,18 @@ class Stats:
         rows = self._exec("SELECT COALESCE(SUM(ac_in), 0), COALESCE(SUM(out), 0) FROM samples "
                           "WHERE ts >= ? AND ts < ?", (int(since), int(until or time.time() + 60)))
         return rows[0][0] * 60 / 3.6e6, rows[0][1] * 60 / 3.6e6
+
+    def backup_bytes(self) -> bytes:
+        """A consistent copy of the database (SQLite's online backup), for sending it as a file."""
+        import tempfile  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = sqlite3.connect(f"{tmp}/copy.db")
+            with self.lock:
+                self.db.backup(copy)
+            copy.close()
+            with open(f"{tmp}/copy.db", "rb") as f:
+                return f.read()
 
     def load_avg_peak(self, since: float, until: float | None = None) -> tuple[float, float] | None:
         """Average and peak output (W) in a period; None without samples."""
@@ -421,10 +443,12 @@ class Stats:
             return card(L.t("sum_nodata", hours=hours))
         outages = self.outages_between(start.timestamp(), end.timestamp())
         off = sum(min(e, end.timestamp()) - max(s, start.timestamp()) for s, e, *_ in outages)
+        volts = self.voltage_range(start.timestamp(), end.timestamp())
         return card(L.t("c_summary", hours=hours), [
             ("🔌 " + L.t("t_outages"), str(len(outages))), ("⏱ " + L.t("t_off"), L.dur(off)),
             ("⚡ " + L.t("r_load"), L.t("r_avg_peak", avg=f"{avg_out:.0f}", peak=f"{max_out:.0f}")),
-            ("⬇️ " + L.t("r_in"), L.energy(sum_in * 60 / 3.6e6)), ("⬆️ " + L.t("r_out"), L.energy(sum_out * 60 / 3.6e6))],
+            ("⬇️ " + L.t("r_in"), L.energy(sum_in * 60 / 3.6e6)), ("⬆️ " + L.t("r_out"), L.energy(sum_out * 60 / 3.6e6)),
+            *([("🔋 " + L.t("r_volts"), f"{volts[0]:.0f}–{volts[1]:.0f} V")] if volts else [])],
             f"{start:%d.%m %H:%M} – {end:%d.%m %H:%M}")
 
     def chart_png(self, hours: int, L: Lang, end: float | None = None) -> bytes | None:

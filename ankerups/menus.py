@@ -218,6 +218,8 @@ class Controller:
         if key in ("light", "dc"):
             return self.toggle(key, ctx)
         if key == "tv" and self.tv:  # the remote widget: power toggles, k<button> presses
+            if value.startswith("bl:") and value[3:].isdigit():
+                return "" if self.tv.set_backlight(int(value[3:])) else ctx.L.t("tv_none") + " ✗"
             if value.startswith("vol:") and value[4:].isdigit():
                 return "" if self.tv.set_volume(int(value[4:])) else ctx.L.t("tv_none") + " ✗"
             if value.startswith("timer:") and value[6:].isdigit() and int(value[6:]) <= 240:
