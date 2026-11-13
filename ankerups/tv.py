@@ -32,7 +32,8 @@ SCANS = {"home": 102, "up": 103, "back": 158, "left": 105, "ok": 28, "right": 10
 IR_FIND = "getevent -pl 2>/dev/null | grep -B1 -i 'ir receiver' | grep -o '/dev/input/event[0-9]*'"
 # the same remote as buttons, for chats without widgets (groups)
 PAD = [[("home", "🏠"), ("up", "⬆️"), ("back", "↩️")], [("left", "⬅️"), ("ok", "OK"), ("right", "➡️")],
-       [("vdown", "🔉 −10"), ("down", "⬇️"), ("vup", "🔊 +10")], [("play", "⏯"), ("mute", "🔇")]]
+       [("vdown", "🔉 −10"), ("down", "⬇️"), ("vup", "🔊 +10")],
+       [("bdown", "🔅 −10"), ("play", "⏯"), ("mute", "🔇"), ("bup", "🔆 +10")]]
 REZKA = "com.falcofemoralis.hdrezkaapp/.views.MainActivity"  # the HDrezka app (its links do not search)
 # taps in HDrezka on a fresh start (1920x1080), each with an extra pause in s (an `input` itself takes ~1 s):
 # the menu's search icon opens the menu, then its "Search" item, then the search field
@@ -52,6 +53,12 @@ IR_PAUSE = 0  # s between those presses: none needed, the app queues them
 # on the results BACK puts it back into the field)
 BACK_IF_KEYBOARD = "sleep 1; dumpsys input_method | grep -q mInputShown=true && input keyevent KEYCODE_BACK"
 ADB_IME = "com.android.adbkeyboard/.AdbIME"  # ADBKeyBoard: types any text (input text is ASCII only)
+# Bluetooth: Android 9's shell can neither connect nor pair (no BLUETOOTH_ADMIN), so pairing goes through the
+# TV's own "Add accessory" screen: it scans, OK on the device starts pairing, its dialog asks to confirm
+HOLD = "/data/local/tmp/.hold"  # a held button's files: .p its loop's pid, .c the key, .k kept alive, .r let go
+ADD_ACCESSORY = "com.android.tv.settings/.accessories.AddAccessoryActivity"
+UI_DUMP = "rm -f /sdcard/.bt.xml; uiautomator dump /sdcard/.bt.xml >/dev/null 2>&1; cat /sdcard/.bt.xml"
+NODE = re.compile(r'<node [^>]*?text="([^"]*)" resource-id="([^"]*)"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 
 
 def _adb_connect(host: str, port: int, key: Path):
@@ -82,6 +89,7 @@ class Tv:
         self.cache: tuple[float, bool | None] = (0.0, None)
         self.down_until = 0.0
         self.ir: str | None = None  # the IR receiver's /dev/input/event*, "" when there is none
+        self.bt = ""  # a Bluetooth speaker the bot pairs again (TV_BT)
 
     @classmethod
     def from_env(cls, env, data: Path) -> "Tv | None":
@@ -94,6 +102,7 @@ class Tv:
             targets.append((host or item.strip(), int(port) if port.isdigit() else 5555))
         tv = cls(*targets[0], data / ".adb" / "adbkey", (env.get("TV_NAME") or "").strip())
         tv.targets = targets
+        tv.bt = (env.get("TV_BT") or "").strip()  # a Bluetooth speaker's name: the 🔊 pair button
         return tv
 
     def _shell(self, cmd: str, timeout: float = 8) -> str | None:
@@ -147,6 +156,28 @@ class Tv:
             self.ir = ""  # no rights to it after all: the slow way from now on
         return self._shell("input keyevent KEYCODE_" + KEYS[name]) is not None
 
+    def hold(self, name: str) -> bool:
+        """Hold a remote button down through the IR receiver (Android repeats a held key itself, every 50 ms:
+        the player rewinds faster and faster) until release(). Called again every ~2 s while held: without
+        that the TV lets it go itself after 5 s (a lost release). Without the IR receiver one press."""
+        if name not in SCANS or self._find_ir() is None:
+            return False
+        if not self.ir:
+            return self.press(name)
+        ev, code = self.ir, SCANS[name]
+        loop = (f"echo $$ >{HOLD}.p; echo {code} >{HOLD}.c; sendevent {ev} 1 {code} 1; sendevent {ev} 0 0 0; n=0; "
+                f"while [ ! -f {HOLD}.r ] && [ $n -lt 25 ]; do sleep 0.2; "
+                f"if [ -f {HOLD}.k ]; then rm -f {HOLD}.k; n=0; else n=$((n+1)); fi; done; "
+                f"sendevent {ev} 1 {code} 0; sendevent {ev} 0 0 0; rm -f {HOLD}.p {HOLD}.r")
+        cmd = (f"touch {HOLD}.k; if [ -f {HOLD}.p ] && kill -0 $(cat {HOLD}.p) 2>/dev/null; then "
+               f"[ \"$(cat {HOLD}.c)\" = {code} ] && echo ok && exit 0; touch {HOLD}.r; sleep 0.3; fi; "
+               f"rm -f {HOLD}.r; nohup sh -c {shlex.quote(loop)} </dev/null >/dev/null 2>&1 & echo ok")
+        return "ok" in (self._shell(cmd) or "")
+
+    def release(self) -> bool:
+        """Let the held button go."""
+        return self._shell(f"[ -f {HOLD}.p ] && touch {HOLD}.r; echo ok") is not None
+
     def _find_ir(self) -> str | None:
         """The IR receiver's device ("" when there is none), looked up once; None if the TV is not reachable."""
         if self.ir is None:
@@ -176,6 +207,59 @@ class Tv:
     def set_backlight(self, value: int) -> bool:
         """0 leaves the screen practically dark with the sound on."""
         return self._shell(f"settings put global picture_backlight {max(0, min(100, int(value)))}") is not None
+
+    def bt_state(self, name: str) -> str | None:
+        """The speaker: "connected" (the active audio device), "paired" (bonded, not playing), "none" (not
+        paired), None when the TV is not reachable."""
+        out = self._shell("dumpsys bluetooth_manager | grep -E '^    [0-9A-F:]{17} \\[|mActiveDevice:'")
+        if out is None:
+            return None
+        addr = next((line.split()[0] for line in out.splitlines()
+                     if line.startswith("    ") and line.rstrip().endswith("] " + name)), None)
+        if not addr:
+            return "none"
+        return "connected" if f"mActiveDevice: {addr}" in out else "paired"
+
+    def _ui(self) -> list[tuple[str, str, int, int]]:
+        """The screen's nodes: (text, resource id, x, y of the centre)."""
+        return [(t, r, (int(a) + int(c)) // 2, (int(b) + int(d)) // 2)
+                for t, r, a, b, c, d in NODE.findall(self._shell(UI_DUMP, timeout=20) or "")]
+
+    def pair_bt(self, name: str, wait: float = 30) -> str:
+        """Pair the speaker (it has to be in pairing mode) through "Add accessory": waits for it in the scan,
+        moves the focus onto it, OK, confirms the dialog. "connected" / "paired" when done, "notfound" when
+        the scan did not show it, "failed" otherwise; ~10-20 s."""
+        if self.state(fresh=True) is not True or self._shell(f"am start -n {ADD_ACCESSORY}") is None:
+            return "failed"
+        deadline, titles = time.time() + wait, []
+        while time.time() < deadline:
+            time.sleep(2)
+            titles = [t for t, r, x, _ in self._ui() if r == "android:id/title" and x > 960]  # the found ones
+            if name in titles:
+                break
+        if name not in titles:
+            self._shell("input keyevent KEYCODE_BACK")
+            return "notfound"
+        keys = ["DPAD_UP"] * len(titles) + ["DPAD_DOWN"] * titles.index(name) + ["DPAD_CENTER"]
+        self._shell("; ".join(f"input keyevent KEYCODE_{k}" for k in keys), timeout=30)
+        for _ in range(10):  # the confirm dialog: its first action is OK (taps work there, not in the list)
+            time.sleep(1.5)
+            actions = [(x, y) for _, r, x, y in self._ui() if r.endswith(":id/action_title")]
+            if actions:
+                self._shell("input tap %d %d" % actions[0])
+                break
+            if self.bt_state(name) != "none":  # paired without a dialog
+                break
+        for _ in range(8):
+            time.sleep(2)
+            if (state := self.bt_state(name)) == "connected":
+                return state
+        return state if state == "paired" else "failed"
+
+    def step_backlight(self, delta: int) -> bool:
+        """Backlight up or down by delta, like step_volume."""
+        value = self.backlight()
+        return value is not None and self.set_backlight(value + delta)
 
     def step_volume(self, delta: int) -> bool:
         """Volume up or down by delta (a button in chats without widgets: one key press is too small)."""

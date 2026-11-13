@@ -1,6 +1,7 @@
 """The 📺 TV remote widget: power, a round pad with the arrows and OK, back, home, play / pause,
 mute, 🔎 HDrezka search, a volume slider and an off timer slider (0-4 h in 10 min steps). A tap sends "tv:power",
-"tv:search" (the bot asks what to find in the chat), "tv:k<button>" (tv.KEYS), "tv:vol:<level>" or "tv:timer:<minutes>" to the bot, which acts on the
+"tv:search" (the bot asks what to find in the chat), "tv:k<button>" (tv.KEYS), an arrow held over 0.4 s
+"tv:hold:<arrow>" (again every 2 s, keeps it down on the TV) and "tv:rel" when let go, "tv:vol:<level>" or "tv:timer:<minutes>" to the bot, which acts on the
 TV over ADB (a slider when it is let go). Its data, set when it is sent: {"at": the off timer's
 Unix time or 0, "v": the volume, "vm": its maximum, "b": the backlight, "s": 1 on / 0 off (each none when
 not known)}; the power button is green when on, red off, grey unknown; status updates skip it.
@@ -31,7 +32,7 @@ background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color);t
 b.p{transform:scale(.9);background:#3a3a3c}
 .pw{flex:none;width:40px;height:40px;color:#8e8e93;box-shadow:0 0 0 2px currentColor,0 0 12px -2px currentColor}
 .pad{position:relative;width:170px;height:170px;margin:8px auto 0;border-radius:50%;background:var(--tg-theme-secondary-bg-color)}
-.pad b{position:absolute;width:48px;height:48px;background:transparent}
+.pad b{position:absolute;width:48px;height:48px;background:transparent;touch-action:none}
 .pad .ok{left:50px;top:50px;width:70px;height:70px;background:var(--tg-theme-bg-color);font-weight:700;font-size:17px}
 .row{display:flex;justify-content:space-between;margin:10px 6px 0}
 .row b{width:46px;height:46px}
@@ -56,8 +57,13 @@ b.p{transform:scale(.9);background:#3a3a3c}
 <div class=tr id=tt><div class=bg></div><div class=fl id=tf></div><div class=kn id=tk></div></div></div>
 <script>
 var W=TelegramWidget,L=__LABELS__,$=function(i){return document.getElementById(i)},D={},AT=0,M=0,V=0,B=0;
-document.querySelectorAll("b[data-k]").forEach(function(b){b.addEventListener("click",function(){
-var k=b.getAttribute("data-k");b.className+=" p";setTimeout(function(){b.className=b.className.replace(" p","")},150);
+function fx(b){b.className+=" p";setTimeout(function(){b.className=b.className.replace(" p","")},150)}
+document.querySelectorAll("b[data-k]").forEach(function(b){var k=b.getAttribute("data-k");
+if("updownleftright".indexOf(k)>-1){var on=0,h=0,T,I;b.addEventListener("pointerdown",function(){on=1;h=0;fx(b);
+T=setTimeout(function(){h=1;W.request("tv:hold:"+k);I=setInterval(function(){W.request("tv:hold:"+k)},2000)},400)});
+function up(){if(!on)return;on=0;clearTimeout(T);clearInterval(I);W.request(h?"tv:rel":"tv:k"+k)}
+["pointerup","pointercancel","pointerleave"].forEach(function(e){b.addEventListener(e,up)});return}
+b.addEventListener("click",function(){fx(b);
 W.request(k=="power"||k=="search"?"tv:"+k:"tv:k"+k).then(function(r){if(k=="power"&&!(typeof r=="string"&&r)&&D.s!=null){D.s=1-D.s;st()}})})});
 function st(){$("pw").style.color=D.s==null?"#8e8e93":D.s?"#30d158":"#ff453a"}
 function p2(n){return String(n).padStart(2,"0")}

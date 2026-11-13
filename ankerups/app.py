@@ -57,7 +57,7 @@ from .tv import Tv
 from .api import Api
 from .stats import Settings, Stats, chart_title, merge_slot
 from .users import Users
-from .schedmenu import ScheduleMenu, alert_note
+from .schedmenu import ScheduleMenu, alert_note, day_text
 from .schedule import Day, Schedule, hhmm, run_schedule, windows, windows_text
 from .watchdog import LoadPeaks, PowerPlan, Watchdog, battery_state
 from .extras import Extras
@@ -362,6 +362,74 @@ async def run(args: argparse.Namespace) -> None:
                                (extras.widget() if extras else {}) | plug_extra())
             return watchdog.name, data
 
+        def status_card(L: Lang) -> str | None:
+            """📊 Status as a rich message with everything the classic widget shows: the grid and for how
+            long, the batteries, the load, the plug, the light / 12V, weather, the air-raid alert, the
+            schedule with its next change and the outage windows (actual, today, tomorrow)."""
+            try:
+                return _status_card(L) if snapshot else None
+            except Exception:  # the text status then
+                log.exception("Status card failed")
+                return None
+
+        def _status_card(L: Lang) -> str:
+            now = time.time()
+            w = (L.t("pl_power", w="", v="").split() + ["W", "·", "V"])[1:4:2]  # the watt / volt units
+            grid = None if watchdog.on_battery is None else not watchdog.on_battery
+            since = watchdog.outage_started if watchdog.on_battery else (stats.last_outage_end() if stats else None)
+            levels = snapshot["levels"]
+            avg = round(sum(levels.values()) / len(levels)) if levels else None
+            title = f"📊 {watchdog.name}: " + {True: L.t("w_on"), False: L.t("w_off")}.get(grid, "?")
+            rows = []
+            if since:
+                rows.append(("⏱ " + (L.t("st_outage", dur="").split(":")[0] if watchdog.on_battery
+                                     else L.t("st_grid", state="").split(":")[0]), L.dur(now - since)))
+            charge = L.charge(levels)
+            if watchdog.on_battery and snapshot.get("remaining_h"):
+                charge += " · ~" + L.dur(snapshot["remaining_h"] * 3600)
+            rows.append(("🔋 " + L.t("t_charge"), charge))
+            rows.append(("⚡ " + L.t("r_load"), f"{snapshot['out'] or 0} {w[0]} · {L.t('w_input')} "
+                                                f"{snapshot['ac_in'] or 0} {w[0]}"))
+            plug = plug_extra()
+            if plug:
+                v = {1: L.t("on"), 0: L.t("off")}.get(plug.get("ps"), "?")
+                if "pw" in plug:
+                    v += f" · {plug['pw']} {w[0]} · {plug['pv']} {w[1]}"
+                rows.append(("🔌 " + L.t("plug"), v))
+            light, dc = controller.widget_controls()
+            if light is not None:
+                rows.append(tuple(L.t("light_title", v=controller._label("light", L)).split(": ", 1)))
+            if dc is not None:
+                rows.append(("🔌 12V", controller._label("dc", L)))
+            if extras and extras.temp is not None:
+                rows.append(("🌡", f"{round(extras.temp):+d}°" + (f" · AQI {extras.aqi}" if extras.aqi is not None else "")))
+            if extras and extras.alert:
+                rows.append(("⚠️ " + L.t("w_alert_near") if extras.alert == "n" else "🚨 " + L.t("w_alert"),
+                             L.dur(now - (extras.alert_since or now))))
+            if schedule and schedule.configured:
+                today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                d_today, d_tomorrow = schedule.day(today), schedule.day(today + timedelta(days=1))
+                emergency = bool(d_today and d_today.status == "emergency")
+                v = L.t("w_emergency") if emergency else ""
+                if change := schedule.next_change(now, grid):
+                    nx = (f"{L.t('w_on_at' if change[1] == '1' else 'w_off_at')} "
+                          f"{time.strftime('%H:%M', time.localtime(change[0]))} · {L.dur(change[0] - now)}")
+                    if watchdog.on_battery and change[1] == "1" and snapshot.get("remaining_h") and avg is not None:
+                        left, need = snapshot["remaining_h"] * 3600, change[0] - now
+                        nx += f" · ✓ ≈{round(avg * (1 - need / left))}%" if need < left else " · ✗"
+                    v = f"{v} · {nx}" if v else nx
+                rows.append(("📅 " + L.t("w_group") + " " + schedule.group, v or "—"))
+                if stats:
+                    fact = stats.grid_slots(today.timestamp(), now)
+                    if grid is not None:
+                        fact = fact[:-1] + merge_slot(fact[-1:] or "-", grid)
+                    rows.append(("🔴 " + L.t("w_fact"), windows_text(fact.replace("p", "0")) or "—"))
+                rows.append(("📅 " + L.t("w_today"), day_text(L, d_today)))
+                if d_tomorrow:
+                    rows.append(("📅 " + L.t("w_tomorrow"), day_text(L, d_tomorrow)))
+            note = L.t("st_age", age=int(time.monotonic() - snapshot["at"]))
+            return card(title, rows, note)
+
         def plug_extra() -> dict:  # the Tuya plug for the widgets: load "pw", voltage "pv", switch "ps"
             if not controller.plug:
                 return {}
@@ -390,7 +458,7 @@ async def run(args: argparse.Namespace) -> None:
         if controller.tv:
             controller.tv.start_timer(settings)
             log.info("TV over ADB at %s:%s", controller.tv.host, controller.tv.port)
-        handlers = BotHandlers(status_text, controller, stats)
+        handlers = BotHandlers(status_text, controller, stats, card=status_card)
         siri = Api.from_env(os.environ, api_routes(controller, watchdog, snapshot, tg, schedule, extras))  # `api` is Anker's
         if siri:
             siri.start()

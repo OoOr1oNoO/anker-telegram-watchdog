@@ -16,6 +16,7 @@ class FakeTv:
     def __init__(self):
         self.awake, self.cmds, self.fail, self.vol, self.bl = True, [], False, 29, 30
         self.packages, self.ir = "", ""
+        self.bt, self.screen = "", ""  # bluetooth: "", "paired", "connected"; screen: "", "scan", "dialog"
 
     def shell(self, cmd, read_timeout_s=None):
         if self.fail:
@@ -29,6 +30,30 @@ class FakeTv:
             if "put" in cmd:
                 self.bl = int(cmd.split()[-1])
             return f"{self.bl}\n"
+        if ".hold" in cmd:
+            return "ok\n"
+        if "bluetooth_manager" in cmd:
+            bonded = "    00:11:22:33:44:55 [BR/EDR] Fenda F5060X\n" if self.bt else ""
+            active = "00:11:22:33:44:55" if self.bt == "connected" else "null"
+            return "    00:11:22:33:44:66 [  LE  ] Xiaomi RC\n" + bonded + f"  mActiveDevice: {active}\n"
+        if "AddAccessoryActivity" in cmd:
+            self.screen = "scan"
+            return "Starting: Intent\n"
+        if "uiautomator" in cmd:
+            node = '<node index="0" text="{}" resource-id="{}" class="x" bounds="[{},{}][{},{}]" />'
+            if self.screen == "scan":
+                return (node.format("Searching…", "android:id/title", 432, 385, 1024, 476)
+                        + node.format("TWS", "android:id/title", 1280, 28, 1460, 66)
+                        + node.format("Fenda F5060X", "android:id/title", 1280, 157, 1460, 195))
+            if self.screen == "dialog":
+                return (node.format("Pair?", "com.android.tv.settings:id/title", 100, 494, 1152, 585)
+                        + node.format("OK", "com.android.tv.settings:id/action_title", 1216, 515, 1258, 564))
+            return ""
+        if "DPAD_CENTER" in cmd and self.screen == "scan" and cmd.count("DPAD_DOWN") == 1:
+            self.screen = "dialog"
+        if cmd == "input tap 1237 539" and self.screen == "dialog":
+            self.screen, self.bt = "", "connected"
+            return ""
         if cmd.startswith("getevent"):
             return self.ir
         if cmd.startswith("sendevent"):
@@ -129,6 +154,10 @@ def test_remote_pad(settings, bot):
     assert c.act("tv", "kok", ctx)[1] == "alert" and dev.cmds[-1] == "input keyevent KEYCODE_DPAD_CENTER"
     assert c.act("tv", "knope", ctx)[0] == "no connection ✗"
     assert c.act("tv", "kvup", ctx)[0] == "" and dev.vol == 39 and c.act("tv", "kvdown", ctx)[0] == "" and dev.vol == 29
+    assert '"a:tv:kbup"' in markup and c.act("tv", "kbup", ctx)[0] == "" and dev.bl == 40  # the backlight
+    assert c.act("tv", "kbdown", ctx)[0] == "" and dev.bl == 30
+    dev.bl = 95
+    assert c.act("tv", "kbup", ctx)[0] == "" and dev.bl == 100
     bot.controller.tv = c.tv
     calls = bot.press(bot.ADMIN, "a:tv:kback")
     assert dev.cmds[-1] == "input keyevent KEYCODE_BACK" and "editMessageText" not in dict(calls)  # the menu stays
@@ -201,6 +230,21 @@ def test_buttons_through_the_ir_receiver(settings):
     assert c.tv.press("vup") and not c.tv.press("nope")
 
 
+def test_held_arrow_in_the_remote_widget(settings):
+    c, dev, ctx = make(settings)
+    assert c.quick_action("tv:hold:right", ctx) == "" and dev.cmds[-1] == "input keyevent KEYCODE_DPAD_RIGHT"  # no IR
+    c, dev, ctx = make(settings)
+    dev.ir = "/dev/input/event0\n"
+    assert c.quick_action("tv:hold:right", ctx) == ""
+    held = dev.cmds[-1]
+    assert "nohup sh -c" in held and "sendevent /dev/input/event0 1 106 1" in held and "1 106 0" in held
+    assert "[ $n -lt 25 ]" in held  # let go by the TV itself 5 s after the last keep-alive
+    assert c.quick_action("tv:rel", ctx) == "" and "touch /data/local/tmp/.hold.r" in dev.cmds[-1]
+    assert c.quick_action("tv:hold:nope", ctx) == "no connection ✗"
+    from ankerups import widget_remote
+    assert '"tv:hold:"+k' in widget_remote.widget_html(EN, "") and '"tv:rel"' in widget_remote.widget_html(EN, "")
+
+
 def test_hdrezka_search_with_the_remotes_arrows(settings):
     c, dev, ctx = make(settings)
     dev.ir, dev.packages = "/dev/input/event0\n", "package:com.android.adbkeyboard\n"
@@ -210,3 +254,20 @@ def test_hdrezka_search_with_the_remotes_arrows(settings):
     assert " 1 105 1 " in cmds[0] and " 1 106 0 " in cmds[0] and "input tap" not in "".join(cmds)  # no taps
     assert "ADB_INPUT_B64" in cmds[1] and "KEYCODE_ENTER" not in "".join(cmds) and len(cmds) == 3
     assert cmds[-1].startswith("ime set com.google.android.inputmethod.latin/")
+
+
+def test_bluetooth_speaker_pairing(settings, bot, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    c, dev, ctx = make(settings)
+    assert '"a:tv:bt"' not in c.render("tv", ctx)[1]  # no TV_BT: no button
+    c.tv.bt = "Fenda F5060X"
+    assert '"a:tv:bt"' in c.render("tv", ctx)[1]
+    assert c.tv.bt_state("Fenda F5060X") == "none" and c.tv.pair_bt("Fenda F5060X") == "connected"
+    assert dev.screen == "" and c.tv.bt_state("Fenda F5060X") == "connected"
+    dev.bt = ""
+    assert c.tv.pair_bt("Nope", wait=0.2) == "notfound" and dev.cmds[-1] == "input keyevent KEYCODE_BACK"
+    bot.controller.tv = c.tv
+    dev.bt = "paired"
+    assert "is paired: turn it on" in json.dumps(bot.press(bot.ADMIN, "a:tv:bt"))
+    dev.bt = "connected"
+    assert "already connected" in json.dumps(bot.press(bot.ADMIN, "a:tv:bt"))

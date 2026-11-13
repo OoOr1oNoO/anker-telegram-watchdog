@@ -39,7 +39,8 @@ Telegram alerts for Anker SOLIX portable power stations used as a UPS.
   there; needs a free Tuya IoT cloud project with your Smart Life account linked (`TUYA_*` in `.env`)
 - Optional **📺 Android TV** over ADB (network debugging, e.g. reached over Tailscale): a remote widget
   (power, a round pad with OK, back, home, play / pause, mute, volume and off timer sliders), on / off
-  and an off timer; button remote in groups (`TV_ADB`, `TV_NAME` in `.env`)
+  and an off timer; button remote in groups; a 🔊 button that pairs a Bluetooth speaker again
+  (`TV_ADB`, `TV_NAME`, `TV_BT` in `.env`)
 - Optional **HTTP API for Siri / Apple Shortcuts** on an address of your choice (e.g. the server's
   Tailscale address) with a secret key: `/status` reads the station out (charge, grid, the next
   scheduled change, load, alerts), `/tv/on|off|toggle|pause|timer?min=|volume?v=`, `/12v/on|off`,

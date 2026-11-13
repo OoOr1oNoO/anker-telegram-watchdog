@@ -68,6 +68,10 @@ def test_refused_widget_falls_back_to_text(wbot: FakeBot):
         return real(method, params, timeout)
     wbot.tg._call = no_widgets
     assert texts(wbot.message(wbot.ADMIN, "📊 Status")) == ["📊 Station\nen"]
+    wbot.handlers.card = lambda L: "<h3>📊 Station: Grid on</h3>"  # the card when there is one
+    calls = wbot.message(wbot.ADMIN, "📊 Status")
+    assert json.loads(dict(calls)["sendRichMessage"]["rich_message"])["html"] == "<h3>📊 Station: Grid on</h3>"
+    assert "sendWidget" not in dict(calls)  # refused for a day: no new tries
 
 
 def test_status_style_per_chat(wbot: FakeBot):
@@ -82,6 +86,9 @@ def test_status_style_per_chat(wbot: FakeBot):
     assert "pathLength" in dict(wbot.message(wbot.ADMIN, "📊 Status"))["sendWidget"]["html"]  # the clock dial
     wbot.press(wbot.ADMIN, "v:text")
     assert texts(wbot.message(wbot.ADMIN, "📊 Status")) == ["📊 Station\nen"]
+    wbot.handlers.card = lambda L: "<h3>📊 Station</h3>"  # the text look is the card
+    assert "sendRichMessage" in dict(wbot.message(wbot.ADMIN, "📊 Status"))
+    wbot.handlers.card = None
     assert wbot.message(wbot.GROUP, "/status", kind="group")[0][0] == "sendWidget"  # other chats keep it
     wbot.press(wbot.ADMIN, "v:bogus")
     assert wbot.users.status_style(wbot.ADMIN) == "text"

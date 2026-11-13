@@ -229,6 +229,10 @@ class Controller:
                 self.settings.set("tv_off_at", str(int(time.time() + m * 60)) if m else "")
                 log.info("TV off timer %s min by %s (remote)", m, ctx.user)
                 return ""
+            if value.startswith("hold:"):  # an arrow held in the remote widget, let go with "rel"
+                return "" if self.tv.hold(value[5:]) else ctx.L.t("tv_none") + " ✗"
+            if value == "rel":
+                return "" if self.tv.release() else ctx.L.t("tv_none") + " ✗"
             if value == "power":
                 state = self.tv.state(fresh=True)
                 ok = state is not None and self.tv.power(not state)
@@ -536,7 +540,8 @@ class Controller:
             [{"text": "⏲" + L.dur(m * 60), "callback_data": f"a:tv:t{m}"} for m in TV_TIMERS]
             + ([{"text": "⏲✗", "callback_data": "a:tv:t0"}] if timer else [])
             + [{"text": "✏️", "callback_data": "a:tvtimer:edit"}],
-            [{"text": "🔎 HDrezka", "callback_data": "a:tvsearch:edit"}],
+            [{"text": "🔎 HDrezka", "callback_data": "a:tvsearch:edit"}]
+            + ([{"text": "🔊 " + self.tv.bt, "callback_data": "a:tv:bt"}] if self.tv.bt else []),
             *([{"text": label, "callback_data": f"a:tv:k{name}"} for name, label in row] for row in PAD),
         ]
         return "\n".join(lines), self._markup(L, rows, back="m:light")
@@ -548,8 +553,9 @@ class Controller:
             log.info("TV %s by %s: %s", value, ctx.user, "ok" if ok else "failed")
             return (L.t("saved") if ok else L.t("tv_none") + " ✗"), "tv"
         if value.startswith("k"):  # a remote button: nothing to redraw, so the menu stays as it is
-            step = {"vdown": -10, "vup": 10}.get(value[1:])
-            ok = self.tv.step_volume(step) if step else self.tv.press(value[1:])
+            step, light = {"vdown": -10, "vup": 10}.get(value[1:]), {"bdown": -10, "bup": 10}.get(value[1:])
+            ok = (self.tv.step_volume(step) if step else self.tv.step_backlight(light) if light
+                  else self.tv.press(value[1:]))
             return ("" if ok else L.t("tv_none") + " ✗"), "alert"
         if value.startswith("t") and value[1:].isdigit() and (int(value[1:]) in TV_TIMERS or value == "t0"):
             m = int(value[1:])

@@ -81,6 +81,7 @@ class BotHandlers:
     widget: "Callable[[], tuple[str, str] | None] | None" = None  # (station name, widget data JSON)
     quick: "Callable[[], str] | None" = None  # data of the ⚙️ Quick settings widget
     sched: "ScheduleMenu | None" = None
+    card: "Render | None" = None  # 📊 Status as a rich message (None before the first telemetry)
 
 
 KEYBOARD_ACTIONS = (("btn_status", "status"), ("btn_light", "light"), ("btn_12v", "light"), ("btn_controls", "light"),
@@ -257,10 +258,10 @@ class Telegram:
             if kind == "widget":
                 try:
                     name, data = payload()
-                    fallback, style = extra
+                    fallback, style, card, markup = extra
                     html = {"ios": widget_ios.widget_html, "clock": widget_clock.widget_html,
                             "quick": widget_quick.widget_html, "remote": widget_remote.widget_html}.get(style, widget_html)(L, name)
-                    self._deliver_widget(chat, html, data, L, fallback, style)
+                    self._deliver_widget(chat, html, data, L, fallback, style, card, markup)
                 except Exception:
                     log.exception("Status widget failed")
                 continue
@@ -387,19 +388,33 @@ class Telegram:
                         exc.read().decode(errors="replace")[:200])
             self._deliver("text", chat, (fallback, markup, True))
 
+    def reply_status(self, chat: str, h: "BotHandlers", L: Lang) -> None:
+        """📊 Status as a card (a rich message), the text if there is no card yet or Telegram refuses it."""
+        if h.card and (rich := h.card(L)):
+            self.reply_rich(chat, lambda L: h.card(L) or rich, h.status)
+        else:
+            self.reply(chat, h.status(L), title=True)
+
     def send_widget(self, chat: str, data: Callable[[], tuple[str, str]], fallback: Render,
-                    style: str = "widget") -> None:
-        """📊 Status as a live widget ("widget" or the app-like "ios"); fallback is the text
-        status if the widget is refused."""
+                    style: str = "widget", card: Render | None = None, markup: Render | None = None) -> None:
+        """📊 Status as a live widget ("widget" or the app-like "ios"); if the widget is refused, card
+        (a rich message, with markup: its inline buttons) or else the fallback text."""
         if self.enabled:
-            self.queue.put(("widget", data, (fallback, style), chat, None, False))
+            self.queue.put(("widget", data, (fallback, style, card, markup), chat, None, False))
 
     def _deliver_widget(self, chat: str, html: str, data: str, L: Lang, fallback: Render,
-                        style: str = "widget") -> None:
+                        style: str = "widget", card: Render | None = None, markup: Render | None = None) -> None:
         params = {"chat_id": chat, "html": html, "chat_data": data, "reply_markup": self.keyboard(L),
                   "allow_queries": "true"}  # the light / 12V buttons inside the widget
-        if self._blocked(f"{chat}|{style}", self.widgets_blocked):  # refused for now: the text status
-            self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
+        def instead() -> None:  # the card (the text if it is refused too), else the text
+            keys = markup(L) if markup else self.keyboard(L)
+            if card and (rich := card(L)):
+                self._deliver_rich(chat, rich, fallback(L), keys)
+            else:
+                self._deliver("text", chat, (fallback(L), keys, True))
+
+        if self._blocked(f"{chat}|{style}", self.widgets_blocked):  # refused for now: the card / text status
+            instead()
             return
         try:
             message = self._call("sendWidget", params, timeout=20)["result"]
@@ -411,7 +426,7 @@ class Telegram:
             elif "WIDGET_NOT_ALLOWED" in body:  # groups: widgets are for private chats for now
                 for look in ("widget", "ios", "clock", "quick", "remote"):
                     self.widgets_blocked[f"{chat}|{look}"] = time.time() + 86400
-            self._deliver("text", chat, (fallback(L), self.keyboard(L), True))
+            instead()
             return
         with self.widget_lock:
             widgets = self._widgets()
@@ -687,9 +702,9 @@ class Telegram:
         elif action == "status":
             style = users.status_style(chat)
             if h.widget and h.widget() and style != "text":
-                self.send_widget(chat, h.widget, h.status, style)
+                self.send_widget(chat, h.widget, h.status, style, h.card)
             else:
-                self.reply(chat, h.status(L), title=True)
+                self.reply_status(chat, h, L)
         if action and msg.get("message_id") and not self._blocked(chat, self.cannot_delete):  # the press
             try:  # groups: only when the bot is an admin allowed to delete messages
                 self._call("deleteMessage", {"chat_id": chat, "message_id": msg["message_id"]})
@@ -778,6 +793,8 @@ class Telegram:
                 self.reply(chat, ctx.L.t("lang_title", v=LANG_NAMES[ctx.L.code]))  # refreshes the keyboard
             elif kind == "a" and rest.endswith(":edit") and rest.split(":")[0] in TEXT_SETTINGS:  # ✏️
                 self._ask(chat, user, rest.split(":")[0], h)
+            elif kind == "a" and rest == "tv:bt" and h.controller.tv and h.controller.tv.bt:  # 🔊 pair the speaker
+                toast = self._pair_bt(chat, h.controller.tv, ctx)
             elif kind == "a" and rest == "tv:remote" and h.controller.tv:  # 📺 the remote widget
                 if chat.startswith("-") or self._blocked(f"{chat}|remote", self.widgets_blocked):  # groups: the card
                     self._edit(msg, h.controller.render("tv", ctx), h.controller.rich("tv", ctx))
@@ -786,7 +803,8 @@ class Telegram:
                     data = widget_remote.remote_data(float(h.controller.settings.get("tv_off_at") or 0),
                                                      h.controller.tv.volume(), h.controller.tv.backlight(),
                                                      h.controller.tv.state())
-                    self.send_widget(chat, lambda: (name, data), lambda L: h.controller.render("tv", ctx)[0], "remote")
+                    self.send_widget(chat, lambda: (name, data), lambda L: h.controller.render("tv", ctx)[0], "remote",
+                                     lambda L: h.controller.rich("tv", ctx), lambda L: h.controller.render("tv", ctx)[1])
             elif kind == "a":
                 key, _, value = rest.partition(":")
                 toast, menu = h.controller.act(key, value, ctx)
@@ -807,6 +825,24 @@ class Telegram:
         with contextlib.suppress(Exception):
             self._call("answerCallbackQuery", {"callback_query_id": cb["id"], "text": toast})
 
+    def _pair_bt(self, chat: str, tv, ctx: Ctx) -> str:
+        """🔊: connected or paired already -> says so; else pairs in the background (~20 s) and reports."""
+        name, L = tv.bt, ctx.L
+        state = tv.bt_state(name)
+        if state is None:
+            return L.t("tv_none") + " ✗"
+        if state != "none":
+            return L.t("tv_bt_on" if state == "connected" else "tv_bt_paired", n=name)
+
+        def pair() -> None:
+            result = tv.pair_bt(name)
+            log.info("TV Bluetooth pairing of %s by %s: %s", name, ctx.user, result)
+            self.reply(chat, lambda L: L.t({"connected": "tv_bt_ok", "paired": "tv_bt_paired",
+                                            "notfound": "tv_bt_notfound"}.get(result, "tv_bt_fail"), n=name))
+        threading.Thread(target=pair, daemon=True, name="tv-bt").start()
+        self.reply(chat, lambda L: L.t("tv_bt_start", n=name))
+        return "🔊 …"
+
     def _handle_widget_query(self, wq: dict, h: BotHandlers) -> None:
         """A button inside the status widget: light or DC 12V (admins); the answer is shown on
         the button for a moment, the new state follows as widget data."""
@@ -823,9 +859,9 @@ class Telegram:
                     result = ctx.L.t("saved")
                 style = users.status_style(chat)
                 if style != "text" and h.widget and h.widget():
-                    self.send_widget(chat, h.widget, h.status, style)
+                    self.send_widget(chat, h.widget, h.status, style, h.card)
                 elif style == "text":
-                    self.reply(chat, h.status(ctx.L), title=True)
+                    self.reply_status(chat, h, ctx.L)
             elif not ctx.admin:
                 result = ctx.L.t("only_admins")
             elif action == "qs" and self._blocked(f"{chat}|quick", self.widgets_blocked):  # no new widgets for now
