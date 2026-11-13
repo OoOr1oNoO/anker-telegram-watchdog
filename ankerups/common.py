@@ -21,6 +21,8 @@ HEALTHCHECK_EVERY = 300  # seconds between pings to HEALTHCHECK_URL
 
 
 IDLE_LOAD_W = 15  # W: below this a full station may run its few watts from the battery with the grid up
+SMALL_LOAD_W = 40  # W: below this a full station drops its input for up to ~2 min with the grid up (13.11, 15-30 W)
+FULL_SOC = 99  # %: full; the station hovers 99-100 %, one battery often stays at 99 for hours
 
 
 log = logging.getLogger("anker_ups")

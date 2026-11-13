@@ -1,8 +1,9 @@
 """The 📺 TV remote widget: power, a round pad with the arrows and OK, back, home, play / pause,
-mute, a volume slider and an off timer slider (0-4 h in 10 min steps). A tap sends "tv:power",
-"tv:k<button>" (tv.KEYS), "tv:vol:<level>" or "tv:timer:<minutes>" to the bot, which acts on the
+mute, 🔎 HDrezka search, a volume slider and an off timer slider (0-4 h in 10 min steps). A tap sends "tv:power",
+"tv:search" (the bot asks what to find in the chat), "tv:k<button>" (tv.KEYS), "tv:vol:<level>" or "tv:timer:<minutes>" to the bot, which acts on the
 TV over ADB (a slider when it is let go). Its data, set when it is sent: {"at": the off timer's
-Unix time or 0, "v": the volume, "vm": its maximum (none when not known)}; status updates skip it.
+Unix time or 0, "v": the volume, "vm": its maximum, "b": the backlight, "s": 1 on / 0 off (each none when
+not known)}; the power button is green when on, red off, grey unknown; status updates skip it.
 """
 
 import json
@@ -18,6 +19,7 @@ ICONS = {
     "home": "<path d='M3 11l9-8 9 8'/><path d='M5 10v10h14V10'/>",
     "play": "<path d='M5 5v14l8-7z'/><path d='M16 5v14M20 5v14'/>",
     "mute": "<path d='M4 9h3l5-4v14l-5-4H4z'/><path d='M16 9l5 6M21 9l-5 6'/>",
+    "search": "<circle cx='11' cy='11' r='6.5'/><path d='M16 16l5 5'/>",
 }
 
 TEMPLATE = """<style>
@@ -27,7 +29,7 @@ body{margin:10px 12px;user-select:none;-webkit-user-select:none}
 b{box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:50%;cursor:pointer;
 background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color);transition:transform .08s,background .08s}
 b.p{transform:scale(.9);background:#3a3a3c}
-.pw{width:38px;height:38px;color:#ff453a}
+.pw{flex:none;width:40px;height:40px;color:#8e8e93;box-shadow:0 0 0 2px currentColor,0 0 12px -2px currentColor}
 .pad{position:relative;width:170px;height:170px;margin:8px auto 0;border-radius:50%;background:var(--tg-theme-secondary-bg-color)}
 .pad b{position:absolute;width:48px;height:48px;background:transparent}
 .pad .ok{left:50px;top:50px;width:70px;height:70px;background:var(--tg-theme-bg-color);font-weight:700;font-size:17px}
@@ -40,12 +42,12 @@ b.p{transform:scale(.9);background:#3a3a3c}
 .tr .fl{position:absolute;top:9px;height:6px;border-radius:3px;background:#ff9f0a}#vf{background:#0a84ff}#bf{background:#ffd60a}
 .tr .kn{position:absolute;top:2px;width:20px;height:20px;margin-left:-10px;border-radius:10px;background:#fff}
 </style>
-<div class=r><span class=t>__NAME__</span><b class=pw data-k=power>__power__</b></div>
+<div class=r><span class=t>__NAME__</span><b class=pw id=pw data-k=power>__power__</b></div>
 <div class=pad>
 <b data-k=up style="left:61px;top:3px">__up__</b><b data-k=left style="left:3px;top:61px">__left__</b>
 <b data-k=right style="right:3px;top:61px">__right__</b><b data-k=down style="left:61px;bottom:3px">__down__</b>
 <b class=ok data-k=ok>OK</b></div>
-<div class=row><b data-k=back>__back__</b><b data-k=home>__home__</b><b data-k=play>__play__</b><b data-k=mute>__mute__</b></div>
+<div class=row><b data-k=back>__back__</b><b data-k=home>__home__</b><b data-k=play>__play__</b><b data-k=mute>__mute__</b><b data-k=search>__search__</b></div>
 <div class=cd id=vc><div class=r><span class=k>__VOLUME__</span><span class=v id=vv></span></div>
 <div class=tr id=vt><div class=bg></div><div class=fl id=vf></div><div class=kn id=vk></div></div></div>
 <div class=cd id=bc><div class=r><span class=k>__LIGHT__</span><span class=v id=bv></span></div>
@@ -56,7 +58,8 @@ b.p{transform:scale(.9);background:#3a3a3c}
 var W=TelegramWidget,L=__LABELS__,$=function(i){return document.getElementById(i)},D={},AT=0,M=0,V=0,B=0;
 document.querySelectorAll("b[data-k]").forEach(function(b){b.addEventListener("click",function(){
 var k=b.getAttribute("data-k");b.className+=" p";setTimeout(function(){b.className=b.className.replace(" p","")},150);
-W.request(k=="power"?"tv:power":"tv:k"+k)})});
+W.request(k=="power"||k=="search"?"tv:"+k:"tv:k"+k).then(function(r){if(k=="power"&&!(typeof r=="string"&&r)&&D.s!=null){D.s=1-D.s;st()}})})});
+function st(){$("pw").style.color=D.s==null?"#8e8e93":D.s?"#30d158":"#ff453a"}
 function p2(n){return String(n).padStart(2,"0")}
 function left(){return AT?Math.min(240,Math.max(0,Math.ceil((AT-Date.now()/1000)/600)*10)):0}
 function bar(i,f){$(i+"k").style.left=f*100+"%";$(i+"f").style.width=f*100+"%"}
@@ -69,7 +72,7 @@ function end(){if(on){on=false;done()}}el.addEventListener("pointerup",end);el.a
 slide("t",function(f){M=Math.round(f*24)*10;AT=M?Date.now()/1000+M*60:0},function(){W.request("tv:timer:"+M)});
 slide("v",function(f){V=Math.round(f*D.vm)},function(){W.request("tv:vol:"+V)});
 slide("b",function(f){B=Math.round(f*20)*5},function(){W.request("tv:bl:"+B)});
-try{D=JSON.parse(W.chatData||"{}")}catch(e){}AT=D.at||0;M=left();V=D.v||0;B=D.b||0;if(!D.vm)$("vc").style.display="none";if(D.b==null)$("bc").style.display="none";draw();
+try{D=JSON.parse(W.chatData||"{}")}catch(e){}AT=D.at||0;M=left();V=D.v||0;B=D.b||0;if(!D.vm)$("vc").style.display="none";if(D.b==null)$("bc").style.display="none";st();draw();
 setInterval(function(){if(AT){M=left();if(!M)AT=0;draw()}},30000);W.ready()
 </script>"""
 
@@ -88,9 +91,10 @@ def widget_html(L: Lang, name: str) -> str:
     return html
 
 
-def remote_data(off_at: float, volume: tuple[int, int] | None = None, backlight: int | None = None) -> str:
-    """The widget's data: when the off timer fires (0: no timer), the volume with its maximum and the
-    backlight (each left out when not known)."""
+def remote_data(off_at: float, volume: tuple[int, int] | None = None, backlight: int | None = None,
+                on: bool | None = None) -> str:
+    """The widget's data: when the off timer fires (0: no timer), the volume with its maximum, the
+    backlight and whether the TV is on (each left out when not known)."""
     data = ({"at": int(off_at)} | ({"v": volume[0], "vm": volume[1]} if volume else {})
-            | ({"b": backlight} if backlight is not None else {}))
+            | ({"b": backlight} if backlight is not None else {}) | ({"s": int(on)} if on is not None else {}))
     return json.dumps(data, separators=(",", ":"))

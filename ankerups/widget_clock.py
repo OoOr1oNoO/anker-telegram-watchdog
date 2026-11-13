@@ -98,7 +98,7 @@ load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick(
 PLUG = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
         "stroke-linejoin='round'><rect x='6' y='7' width='12' height='9' rx='3'/><path d='M9 7V3M15 7V3M12 16v2q0 3 3 3h3'/></svg>")
 SOCKET = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
-          "stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='12' cy='12' r='5'/><path d='M10 11v2M14 11v2'/></svg>")
+          "stroke-linejoin='round'><circle cx='12' cy='12' r='9'/><path d='M8.5 12h.1M15.5 12h.1' stroke-width='3'/></svg>")
 HOME = ("<svg viewBox='0 0 24 24' fill='none' stroke='#8e8e93' stroke-width='1.8' stroke-linecap='round' "
         "stroke-linejoin='round'><path d='M3 11l9-7 9 7'/><path d='M5.5 9.5V20h13V9.5'/><path d='M10 20v-5h4v5'/></svg>")
 

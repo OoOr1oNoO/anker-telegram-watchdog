@@ -135,3 +135,19 @@ def test_threshold_and_back_cards_show_the_load(run, stats):
     run(20, 120, {"main": 45}, load=70)
     back = run.cards[-1]
     assert "Grid power is back" in back and "<td>⚡ Load</td><td>avg" in back and "⬆️ Used" in back
+
+
+def test_full_at_99_percent_under_a_small_load_rides_out_long_gaps(run):
+    # 13.11: one battery at 99 %, 10-30 W, the input dropped for up to ~100 s with the grid up
+    almost = {"main": 99, "expansion": 100}
+    run(20, 20, almost, load=20)
+    for gap, load in [(40, 20), (60, 12), (100, 25), (36, 18)]:
+        run(gap, 0, almost, load=load)
+        run(8, 20, almost, load=20)
+    assert run.sent == []
+
+
+def test_small_load_outage_on_full_station_after_three_minutes(run):
+    run(20, 25, FULL, load=25)
+    run(240, 0, FULL, load=25)
+    assert [at for at, _ in run.sent] == [200]

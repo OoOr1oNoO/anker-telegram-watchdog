@@ -10,9 +10,10 @@ from .i18n import Lang
 from .translations import UNITS
 
 TEMPLATE = """<style>
-body{margin:12px 14px}
+body{margin:12px 14px;overflow:hidden}
 .r{display:flex;justify-content:space-between;align-items:center}
-.nm{font-weight:700;font-size:17px}.hn{font-size:12px;color:var(--tg-theme-hint-color)}
+.r{gap:6px;white-space:nowrap}.nm{font-weight:700;font-size:17px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.hn{font-size:12px;color:var(--tg-theme-hint-color)}
 .big{text-align:center;font-size:56px;font-weight:700;line-height:1.05;margin-top:8px}
 .st{text-align:center;font-weight:700;font-size:13px;margin-top:4px}
 .sb{text-align:center;font-size:13px;font-weight:600;margin-top:2px}
@@ -21,7 +22,7 @@ body{margin:12px 14px}
 .io{display:flex;justify-content:space-between;margin-top:6px}
 .io div{display:flex;align-items:baseline;gap:7px;padding:5px 12px;border-radius:14px;border:2px solid #636366}
 .io small,.k{font-size:11px;font-weight:600;color:var(--tg-theme-hint-color)}
-#pw svg{width:15px;height:15px;vertical-align:-4px}
+#pw svg{width:17px;height:17px;vertical-align:-4px}
 .io b{font-size:20px}
 .fc{border-top:1px solid var(--tg-theme-section-separator-color);margin-top:10px;padding-top:8px;text-align:center}
 .fc b{display:block;font-size:26px;margin-top:2px}.fc i{font-style:normal;font-size:12px;color:var(--tg-theme-hint-color)}
@@ -30,7 +31,7 @@ body{margin:12px 14px}
 #x{position:relative;margin-top:14px;height:14px;border-radius:9px;border:2px solid #f2f2f7}
 #mk{position:absolute;top:-5px;width:4px;height:24px;margin-left:-2px;border-radius:2px;background:#fff}
 .h{display:flex;justify-content:space-between;font-size:10px;color:var(--tg-theme-hint-color);margin-top:3px}.h i{font-style:normal}
-.al{font-size:12px;font-weight:600;padding:2px 8px;border-radius:9px;white-space:nowrap}
+.al{font-size:12px;font-weight:600;padding:2px 8px;border-radius:9px}
 .k2{display:flex;gap:8px;margin-top:10px;justify-content:flex-end}
 .k2 button{width:48px;height:48px;border-radius:24px;padding:0;display:flex;align-items:center;justify-content:center;
 background:#3a3a3c;color:#fff}.k2 button.a{background:#fff;color:#1c1c1e}
@@ -74,14 +75,14 @@ var x=$("x");x.style.background="linear-gradient(90deg,"+st.join(",")+")";
 x.innerHTML="<i id='mk' style='left:"+np.toFixed(1)+"%'></i>"}
 function wi(c){return c<1?"☀️":c<3?"⛅":c<4?"☁️":c<50?"🌫":c<70?"🌧":c<80?"❄️":c<83?"🌦":c<90?"🌨":"⛈"}
 function alarm(d,t){var a=$("al");if(!d.al){a.style.display="none";return}a.style.display="";var k=d.al[0];
-a.textContent=(k=="n"?L.aln:L.alr)+" · "+dur(t-d.al[1]);a.style.background={r:"#da3633",y:"#e3b341",o:"#f0883e"}[k]||"#3a3a3c";
+a.textContent=(k=="n"?"⚠️ ":"🚨 ")+dur(t-d.al[1]);a.style.background={r:"#da3633",y:"#e3b341",o:"#f0883e"}[k]||"#3a3a3c";
 a.style.color=k=="y"?"#111":"#fff"}
 function tick(){var d=D,t=now(),g=d.g,a=avg();if(!d.t)return;
 $("b").textContent=a==null?"—":a+"%";var bb=d.b||[];
 $("bs").textContent=bb.length>1?bb.map(function(x,i){return(i?L.e+(bb.length>2?" "+i:""):L.m)+" "+x+"%"}).join(" · "):"";
 var s=$("s");s.textContent=(g==null?"?":g?L.on:L.off).toUpperCase();s.style.color=g===0?"#ff9f0a":"#30d158";
 $("sb").textContent=d.c?dur(t-d.c):"";$("sb").style.color=s.style.color;
-$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";$("pw").innerHTML=d.pw==null?"":SV+"<rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='12' cy='12' r='5'/><path d='M10 11v2M14 11v2'/></svg> "+d.pw+" W"+" · "+d.pv+" V";
+$("i").textContent=(d.i||0)+" W";$("o").textContent=(d.o||0)+" W";$("pw").innerHTML=d.pw==null?"":SV+"<circle cx='12' cy='12' r='9'/><path d='M8.5 12h.1M15.5 12h.1' stroke-width='3'/></svg> "+d.pw+" W"+" · "+d.pv+" V";
 var nx=d.x&&d.x[0]>t?d.x:null,fc=$("fc");
 if(g===0&&nx&&d.r&&a!=null){var left=d.r*3600-(t-d.t),need=nx[0]-t;fc.style.display="";
 $("fk").textContent=L.leftk;$("fk").style.color="#ff9f0a";$("fv").textContent=need<left?"≈ "+Math.round(a*(1-need/left))+"%":"✗";
@@ -107,7 +108,7 @@ load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)tick(
 
 def labels(L: Lang) -> dict:
     return {"on": L.t("w_on"), "off": L.t("w_off"), "leftk": L.t("wi_left_on"),
-            "rem": L.t("wi_remaining"), "grp": L.t("w_group"), "day": L.t("w_day"), "emg": L.t("w_emergency"), "alr": L.t("w_alert"), "aln": L.t("w_alert_near"),
+            "rem": L.t("wi_remaining"), "grp": L.t("w_group"), "day": L.t("w_day"), "emg": L.t("w_emergency"),
             "m": L.t("bat_main"), "e": L.t("bat_expansion"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"), "y": L.t("m_on"), "n": L.t("m_off"),
             "u": list(UNITS[L.code][:3])}
 

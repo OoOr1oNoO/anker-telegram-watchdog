@@ -15,6 +15,7 @@ class FakeTv:
 
     def __init__(self):
         self.awake, self.cmds, self.fail, self.vol, self.bl = True, [], False, 29, 30
+        self.packages, self.ir = "", ""
 
     def shell(self, cmd, read_timeout_s=None):
         if self.fail:
@@ -28,6 +29,14 @@ class FakeTv:
             if "put" in cmd:
                 self.bl = int(cmd.split()[-1])
             return f"{self.bl}\n"
+        if cmd.startswith("getevent"):
+            return self.ir
+        if cmd.startswith("sendevent"):
+            return "ok\n"
+        if "pm list packages" in cmd:
+            return self.packages
+        if "default_input_method" in cmd:
+            return "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME\n"
         if "--set" in cmd:
             self.vol = int(cmd.split()[-1])
         if "--get" in cmd:
@@ -129,6 +138,7 @@ def test_remote_widget(settings, bot):
     from ankerups import widget, widget_remote
     html = widget_remote.widget_html(EN, "")
     assert "📺 TV" in html and 'data-k=ok' in html and '"tv:k"+k' in html and "__" not in html
+    assert "data-k=search" in html
     assert widget.compressed_size(html) <= 4000
     c, dev, ctx = make(settings)
     assert c.quick_action("tv:kmute", ctx) == "" and dev.cmds[-1] == "input keyevent KEYCODE_VOLUME_MUTE"
@@ -137,12 +147,16 @@ def test_remote_widget(settings, bot):
     bot.controller.tv = c.tv
     calls = bot.press(bot.ADMIN, "a:tv:remote")
     sent = dict(calls)["sendWidget"]
-    assert "data-k=ok" in sent["html"] and sent["chat_data"] == '{"at":0,"v":29,"vm":100,"b":30}'
+    assert "data-k=ok" in sent["html"] and sent["chat_data"] == '{"at":0,"v":29,"vm":100,"b":30,"s":1}'
     assert c.quick_action("tv:bl:0", ctx) == "" and dev.bl == 0 and c.tv.backlight() == 0
     assert c.tv.volume() == (29, 100) and c.quick_action("tv:vol:40", ctx) == "" and dev.vol == 40
     assert c.quick_action("tv:timer:40", ctx) == "" and 2390 < float(settings.get("tv_off_at")) - time.time() <= 2400
     assert '"at":' in dict(bot.press(bot.ADMIN, "a:tv:remote"))["sendWidget"]["chat_data"]
     assert c.quick_action("tv:timer:0", ctx) == "" and settings.get("tv_off_at") == ""
+    bot.tg._handle_widget_query({"id": "1", "data": "tv:search", "chat": {"id": int(bot.ADMIN)},
+                                 "from": {"id": int(bot.ADMIN)}}, bot.handlers)  # 🔎: asked in the chat
+    asked = bot.drain()
+    assert any("What to find in HDrezka" in json.dumps(p, ensure_ascii=False) for m, p in asked if m == "sendMessage")
     before = len(bot.calls)
     bot.tg.update_widgets('{"t":1}', force=True)  # status updates leave the remote alone
     assert not [p for m, p in bot.calls[before:] if m == "editMessageWidgetData"]
@@ -154,3 +168,45 @@ def test_remote_in_a_group_shows_the_card(settings, bot):
     bot.controller.tv = c.tv
     calls = bot.press(bot.GROUP, "a:tv:remote", user=bot.ADMIN)
     assert "sendWidget" not in dict(calls) and "📺 TV: on" in json.loads(dict(calls)["editMessageText"]["rich_message"])["html"]
+
+
+def test_hdrezka_search(settings):
+    c, dev, ctx = make(settings)
+    assert '"a:tvsearch:edit"' in c.render("tv", ctx)[1]
+    dev.cmds = []
+    assert c.tv.search("Inception 2010")
+    cmds = [cmd for cmd in dev.cmds if not cmd.startswith(("pm list", "settings get", "getevent"))]
+    assert cmds[0].startswith("am start -S -W -n com.falcofemoralis.hdrezkaapp/") and "ime set" not in cmds[0]
+    assert "input tap 150 540" in cmds[1] and cmds[2] == "input text Inception%s2010; input keyevent KEYCODE_ENTER"
+    assert "mInputShown=true && input keyevent KEYCODE_BACK" in cmds[3]  # a keyboard left over: hidden
+    assert "*act_suggest*) input keyevent KEYCODE_TAB" in cmds[4]  # then the focus onto the results
+    assert not c.tv.can_type("Начало") and not c.tv.search("Начало")  # Cyrillic needs ADBKeyBoard
+    assert c.text_setting("tvsearch", "Начало", ctx) is None and c.text_setting("tvsearch", "  ", ctx) is None
+    dev.packages, dev.cmds = "package:com.android.adbkeyboard\n", []
+    assert c.tv.can_type("Начало") and c.tv.search("Начало")
+    assert any("ime set com.android.adbkeyboard/.AdbIME" in cmd and "am start" in cmd for cmd in dev.cmds)
+    assert any("ADB_INPUT_B64 --es msg 0J3QsNGH0LDQu9C+" in cmd for cmd in dev.cmds)
+    assert dev.cmds[-1].startswith("ime set com.google.android.inputmethod.latin/")  # the remote's keyboard back
+    assert c.text_setting("tvsearch", "Начало", ctx) == ("🔎 Searching HDrezka on the TV: Начало", None)
+    c.tv.power(False)
+    assert c.text_setting("tvsearch", "matrix", ctx) is None  # off: nothing to type into
+
+
+def test_buttons_through_the_ir_receiver(settings):
+    c, dev, ctx = make(settings)
+    dev.ir = "/dev/input/event0\n"
+    assert c.tv.press("ok") and dev.cmds[-1].startswith("sendevent /dev/input/event0 1 28 1 && sendevent")
+    assert c.tv.press("back") and " 1 158 0 " in dev.cmds[-1]
+    assert sum(cmd.startswith("getevent") for cmd in dev.cmds) == 1  # found once
+    assert c.tv.press("vup") and not c.tv.press("nope")
+
+
+def test_hdrezka_search_with_the_remotes_arrows(settings):
+    c, dev, ctx = make(settings)
+    dev.ir, dev.packages = "/dev/input/event0\n", "package:com.android.adbkeyboard\n"
+    assert c.tv.search("Шрек")
+    cmds = [cmd for cmd in dev.cmds if not cmd.startswith(("pm list", "settings get", "getevent"))]
+    assert cmds[0].startswith("am start -S") and "ime set com.android.adbkeyboard" in cmds[0]
+    assert " 1 105 1 " in cmds[0] and " 1 106 0 " in cmds[0] and "input tap" not in "".join(cmds)  # no taps
+    assert "ADB_INPUT_B64" in cmds[1] and "KEYCODE_ENTER" not in "".join(cmds) and len(cmds) == 3
+    assert cmds[-1].startswith("ime set com.google.android.inputmethod.latin/")

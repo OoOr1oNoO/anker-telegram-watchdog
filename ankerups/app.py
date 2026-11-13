@@ -38,6 +38,7 @@ from anker_solix_api.mqtt_pps import MODELS as PPS_MODELS
 
 from .bot import BotHandlers, Telegram, card
 from .common import (
+    FULL_SOC,
     HEALTHCHECK_EVERY,
     IDLE_LOAD_W,
     IS_WINDOWS,
@@ -638,7 +639,7 @@ class RuntimeGrid:
         self.samples.append((now, drain - max(0, (out or 0) - (ac_in or 0))))
         while self.samples and now - self.samples[0][0] > self.window:
             self.samples.popleft()
-        if len(self.samples) < 3 or min(levels.values()) < 100 or (out or 0) >= IDLE_LOAD_W:
+        if len(self.samples) < 3 or min(levels.values()) < FULL_SOC or (out or 0) >= IDLE_LOAD_W:
             # only a full station with a small load needs it (else the grid shows in the input), and
             # under a load the estimate is off (the capacity is approximate): not used then
             self.extra = statistics.median(x for _, x in self.samples) if self.samples else None

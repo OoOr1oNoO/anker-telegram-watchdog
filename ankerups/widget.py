@@ -15,9 +15,9 @@ MAX_DATA = 1024
 MAX_HTML_COMPRESSED = 4096
 
 TEMPLATE = """<style>
-body{margin:10px 12px}
-.r{display:flex;justify-content:space-between;align-items:center;gap:6px}
-.t{font-weight:600;font-size:15px}
+body{margin:10px 12px;overflow:hidden}
+.r{display:flex;justify-content:space-between;align-items:center;gap:6px;white-space:nowrap}
+.t{font-weight:600;font-size:15px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .p{font-size:12px;font-weight:600;padding:2px 8px;border-radius:9px;color:#fff;background:#6e7681}
 .g{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
 .c{background:var(--tg-theme-secondary-bg-color);border-radius:10px;padding:7px 9px}
@@ -35,8 +35,7 @@ body{margin:10px 12px}
 .tk{margin:1px 2px 0 70px;height:7px;color:var(--tg-theme-hint-color)}.tk svg{display:block}
 .h{display:flex;margin-left:65px;font-size:10px;color:var(--tg-theme-hint-color)}
 .h i{flex:1;font-style:normal;display:flex;justify-content:space-between}
-.al{white-space:nowrap}
-.bx{display:flex;align-items:center;gap:3px;font-style:normal;padding:0 5px;border-radius:7px;border:1.5px solid}
+.bx{display:flex;align-items:center;gap:3px;font-style:normal;padding:0 5px;border-radius:7px;border:1.5px solid;white-space:nowrap}
 .k2{display:flex;gap:6px;margin-top:8px}
 .k2 b{display:flex;align-items:center;gap:6px;height:32px;padding:0 11px;border-radius:8px;font-size:13px;
 background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}.k2 b.a{background:#2ea043;color:#fff}
@@ -58,14 +57,14 @@ function hm(t){var d=new Date(t*1000);return String(d.getHours()).padStart(2,"0"
 function cls(c){return c=="1"?"on":c=="0"?"off":c=="?"?"may":c=="p"?"part":"e"}
 function strip(name,s,cur){var h="<div class='l'><span>"+name+"</span><div class='x'>";
 for(var i=0;i<48;i++)h+="<i class='"+cls(s[i])+(i==cur?" now":"")+"'></i>";return h+"</div></div>"}
-var SK="<rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='12' cy='12' r='5'/><path d='M10 11v2M14 11v2'/></svg>",
+var SK="<circle cx='12' cy='12' r='9'/><path d='M8.5 12h.1M15.5 12h.1' stroke-width='3'/></svg>",
 I14="<svg viewBox='0 0 24 24' width='14' height='14' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>",
 CL="<path d='M7 16h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 9a3.5 3.5 0 0 0 1 7z'/>";
 function WX(c){return I14+(c<1?"<circle cx='12' cy='12' r='4'/><path d='M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5'/>"
 :c<3?"<circle cx='8' cy='7' r='3'/><path d='M8 1.5v1M2.5 7h1M4 3l.7.7'/>"+CL:c<4?CL:c<50?"<path d='M4 9h16M4 13h16M6 17h12'/>"
 :c<70||c>79&&c<83?CL+"<path d='M8 21l1-2M12 21l1-2M16 21l1-2'/>":c<90?CL+"<path d='M8 20v.01M12 22v.01M16 20v.01'/>":CL+"<path d='M12 16l-2 3h3l-2 3'/>")+"</svg>"}
 function alarm(d,t){var a=$("al");if(!d.al){a.style.display="none";return}a.style.display="";var k=d.al[0];
-a.textContent=(k=="n"?L.aln:L.alr)+" · "+dur(t-d.al[1]);a.style.background={r:"#da3633",y:"#e3b341",o:"#f0883e"}[k]||"#3a3a3c";
+a.textContent=(k=="n"?"⚠️ ":"🚨 ")+dur(t-d.al[1]);a.style.background={r:"#da3633",y:"#e3b341",o:"#f0883e"}[k]||"#3a3a3c";
 a.style.color=k=="y"?"#111":"#fff"}
 function draw(){var d=D,t=now();if(!d.t)return;alarm(d,t);$("wx").innerHTML=d.w?"<i class='bx' style='border-color:"+d.w[3]+"'>"+WX(d.w[1])+(d.w[0]>0?"+":"")+d.w[0]+"°</i>"+(d.w[2]!=null?"<i class='bx' style='border-color:"+
 ["#2ea043","#7ee2a0","#e3b341","#f0883e","#da3633","#8b1a1a"][Math.min(5,Math.floor(d.w[2]/20))]+"'>AQI "+d.w[2]+"</i>":""):"";
@@ -112,7 +111,7 @@ load();W.onEvent("chatDataChanged",load);function vf(){if(!document.hidden)draw(
 def labels(L: Lang) -> dict:
     return {"on": L.t("w_on"), "off": L.t("w_off"), "m": L.t("bat_main"), "e": L.t("bat_expansion"),
             "in": L.t("w_input"), "fact": L.t("w_fact"), "today": L.t("w_today"), "tmr": L.t("w_tomorrow"),
-            "grp": L.t("w_group"), "day": L.t("w_day"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"), "emg": L.t("w_emergency"), "alr": L.t("w_alert"), "aln": L.t("w_alert_near"),
+            "grp": L.t("w_group"), "day": L.t("w_day"), "onat": L.t("w_on_at"), "offat": L.t("w_off_at"), "emg": L.t("w_emergency"),
             "y": L.t("m_on"), "n": L.t("m_off"),
             "u": list(UNITS[L.code][:3])}
 

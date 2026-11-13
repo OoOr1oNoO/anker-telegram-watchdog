@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from .bot import Telegram, card
-from .common import IDLE_LOAD_W, IS_WINDOWS, POWER_SAVER_GUID, as_int, data_dir, log
+from .common import FULL_SOC, IDLE_LOAD_W, IS_WINDOWS, SMALL_LOAD_W, POWER_SAVER_GUID, as_int, data_dir, log
 from .i18n import Lang
 from .stats import Settings, Stats
 
@@ -127,6 +127,7 @@ class Watchdog:
         self.settings = settings
         self.on_battery: bool | None = None  # None until the first telemetry
         self.no_grid_since: float | None = None
+        self.low_load: int | None = None  # the smallest load since the input dropped: picks the wait
         self.outage_started: float | None = None  # wall clock, for the outage duration
         self.fired: dict[str, set[int]] = {}  # battery name -> thresholds already reported
         self.critical_fired = False
@@ -171,6 +172,7 @@ class Watchdog:
         name = self.name
         if grid:
             self.no_grid_since = None
+            self.low_load = None
             if self.on_battery is None and self.stats and (start := self.stats.open_outage()):
                 # the outage ended while we were not running
                 self.on_battery, self.outage_started = True, start
@@ -228,12 +230,19 @@ class Watchdog:
 
         if self.no_grid_since is None:
             self.no_grid_since = now
+        # the smallest load since the input dropped: a load hovering around a limit below must not
+        # shorten the wait from one reading to the next (13.11: 10-30 W, an alert every few seconds)
+        self.low_load = min(load or 0, self.low_load if self.low_load is not None else load or 0)
+        full = min(levels.values()) >= FULL_SOC and not self.plug_known
         wait = self.confirm_s
-        if min(levels.values()) >= 100 and not self.plug_known:
+        if full:
             # a full station passing the grid through to a load drops its input for a few seconds now
             # and then (seen: 6 s at 38 W) while the grid is up: a little longer to confirm
             wait = max(wait, FULL_PASS_CONFIRM_S)
-        if min(levels.values()) >= 100 and (load or 0) < IDLE_LOAD_W and not self.plug_known:
+        if full and self.low_load < SMALL_LOAD_W:
+            # ... and under a small load for up to ~2 min (13.11, 15-30 W)
+            wait = max(wait, self.full_confirm_s)
+        if full and self.low_load < IDLE_LOAD_W:
             # a full idle station takes its few watts in pulses minutes apart (seen up to 14 min)
             # with the grid up; the schedule is not trusted here, it is often not kept
             wait = max(self.full_confirm_s, self.idle_confirm_s)

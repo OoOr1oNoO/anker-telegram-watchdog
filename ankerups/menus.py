@@ -3,6 +3,7 @@
 
 import json
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -101,7 +102,8 @@ def paint(rows: list[list[dict]]) -> list[list[dict]]:
 TEXT_SETTINGS = {"autolight": ("al_auto_ask", "al_auto_bad", "light"),
                  "tariff": ("tf_ask", "tf_bad", "notif"),
                  "plugcycle": ("pl_ask", "pl_bad", "plug"),
-                 "tvtimer": ("tv_ask", "tv_bad", "tv")}
+                 "tvtimer": ("tv_ask", "tv_bad", "tv"),
+                 "tvsearch": ("tv_s_ask", "tv_s_bad", "tv")}
 TV_TIMERS = [30, 60, 120]  # minutes until the TV goes off
 PLUG_TIMERS = [30, 60, 120, 240]  # minutes: the plug switches over when the countdown ends
 PLUG_CYCLES = ["10/10", "15/15", "20/10", "30/30"]
@@ -274,6 +276,16 @@ class Controller:
             self.settings.set("tv_off_at", str(int(at)))
             log.info("TV off timer %s by %s", text.strip(), ctx.user)
             return self.render("tv", ctx)
+        elif kind == "tvsearch":
+            query = " ".join(text.split())
+            if not self.tv or not query or not self.tv.can_type(query):
+                return None
+            tv = self.tv
+
+            def search() -> None:  # ~15 s of taps and typing: not in the bot's thread
+                log.info("TV search %r by %s: %s", query, ctx.user, "ok" if tv.search(query) else "failed")
+            threading.Thread(target=search, daemon=True, name="tv-search").start()
+            return ctx.L.t("tv_s_started", q=query), None  # just a note: the remote widget stays in use
         elif kind == "plugcycle":
             cycle = parse_cycle(text) if self.plug else None
             if not cycle:
@@ -524,6 +536,7 @@ class Controller:
             [{"text": "⏲" + L.dur(m * 60), "callback_data": f"a:tv:t{m}"} for m in TV_TIMERS]
             + ([{"text": "⏲✗", "callback_data": "a:tv:t0"}] if timer else [])
             + [{"text": "✏️", "callback_data": "a:tvtimer:edit"}],
+            [{"text": "🔎 HDrezka", "callback_data": "a:tvsearch:edit"}],
             *([{"text": label, "callback_data": f"a:tv:k{name}"} for name, label in row] for row in PAD),
         ]
         return "\n".join(lines), self._markup(L, rows, back="m:light")

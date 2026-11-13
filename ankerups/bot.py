@@ -784,7 +784,8 @@ class Telegram:
                 else:
                     name = h.controller.tv.name or ctx.L.t("tv")
                     data = widget_remote.remote_data(float(h.controller.settings.get("tv_off_at") or 0),
-                                                     h.controller.tv.volume(), h.controller.tv.backlight())
+                                                     h.controller.tv.volume(), h.controller.tv.backlight(),
+                                                     h.controller.tv.state())
                     self.send_widget(chat, lambda: (name, data), lambda L: h.controller.render("tv", ctx)[0], "remote")
             elif kind == "a":
                 key, _, value = rest.partition(":")
@@ -833,6 +834,8 @@ class Telegram:
                 name = info[0]
                 self.send_widget(chat, lambda: (name, widget_quick.with_look(h.quick(), users.status_style(chat))),
                                  h.status, "quick")
+            elif action == "tv:search" and h.controller.tv:  # 🔎 in the remote: what to find, typed in the chat
+                self._ask(chat, user, "tvsearch", h)
             elif action:
                 result = h.controller.quick_action(action, ctx)
         log.info("Widget button %s by %s in %s: %s", action, user, chat, result)

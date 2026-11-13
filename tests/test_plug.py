@@ -115,7 +115,7 @@ def test_widgets_have_the_socket_line():
     from ankerups import widget, widget_clock, widget_ios
     for mod in (widget, widget_ios, widget_clock):
         html = mod.widget_html(EN, "Station")
-        assert "M10 11v2M14 11v2" in html and '" · "+d.pv+" V"' in html
+        assert "M8.5 12h.1" in html and '" · "+d.pv+" V"' in html
 
 
 def test_widget_plug_button_toggles_it(settings):
